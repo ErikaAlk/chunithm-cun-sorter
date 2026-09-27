@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
-"""主窗口：左侧导航 + 三页 + 托盘，以及各页共用的那几个后台服务。
+"""主窗口：侧栏 + 三页 + 托盘，以及各页共用的那几个后台服务。
+
+窗口结构照 DESIGN.md 16.2：左侧栏 224（窗口窄于 840 收成 72 宽的图标竖栏），
+右边是页面；系统标题栏保留，Mica 铺满标题栏、侧栏和页面底（16.3）。
 
 后台线程（监视、内存读取、联动、截图）的回调**一律通过信号**回到界面线程。
 直接从工作线程碰部件在 Qt 里是未定义行为，偶发崩溃最难查。
@@ -10,13 +13,14 @@ from __future__ import annotations
 import os
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QIcon
+from PySide6.QtCore import QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QAction, QIcon, QPainter, QPen
 from PySide6.QtWidgets import (QApplication, QFileDialog, QHBoxLayout, QListWidget,
-                               QListWidgetItem, QMainWindow, QMenu, QStackedWidget,
-                               QSystemTrayIcon, QVBoxLayout, QWidget)
+                               QListWidgetItem, QMainWindow, QMenu, QStackedWidget, QStyle,
+                               QStyledItemDelegate, QSystemTrayIcon, QVBoxLayout, QWidget)
 
 from core import classifier, paths, winapi
 from core import config as config_mod
@@ -28,25 +32,133 @@ from core.ocr import OcrEngine
 from core.version import APP_NAME
 from core.watcher import Watcher
 
-from . import theme, widgets
+from . import icons, theme, widgets
 from .first_run import ask_for_game_root
 from .page_config import ConfigPage
 from .page_run import RunPage
 from .page_stats import StatsPage
-from .widgets import Toast
+from .theme import metrics as m
+from .widgets import Anim, Toast
 
 #: 判定数冻结多久算「结算画面已经出来了」
 _FREEZE_TRIGGER_SEC = 2.5
 #: 少于这么多音符不当一次有效演奏
 _MIN_NOTES = 10
-#: 侧栏宽度与每一项的行高
-_SIDEBAR_WIDTH = 152
-_NAV_ROW_HEIGHT = 32
+#: 侧栏三项：(标题, 图标)
+_NAV = (("配置", "settings"), ("统计", "stats"), ("运行", "run"))
+#: WM_SETTINGCHANGE / WM_THEMECHANGED：系统改了透明效果、对比度、文本大小或动画
+_WM_SETTINGCHANGE, _WM_THEMECHANGED = 0x001A, 0x031A
 
 
+# ----------------------------- 侧栏 -----------------------------------------
+class _NavDelegate(QStyledItemDelegate):
+    """侧栏项：选中换实心图标，图标和文字用主题色；底是 fill8、圆角 12，由 NavList 画。"""
+
+    def __init__(self, nav: "NavList") -> None:
+        super().__init__(nav)
+        self.nav = nav
+
+    def sizeHint(self, option, _index) -> QSize:    # noqa: N802
+        return QSize(option.rect.width(), theme.scaled(m.NAV_ITEM) + 2)
+
+    def paint(self, painter: QPainter, option, index) -> None:
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(option.rect).adjusted(0, 1, 0, -1)
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        rad = float(m.RADIUS_MENU)
+        if option.state & QStyle.StateFlag.State_MouseOver and not selected:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(theme.color("hover"))
+            painter.drawRoundedRect(r, rad, rad)
+        if (self.nav.hasFocus() and widgets.keyboard_focus()
+                and index.row() == self.nav.currentRow()):
+            w = m.FOCUS_RING_WIDTH
+            painter.setPen(QPen(theme.color("focusRing"), w))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(r.adjusted(w / 2, w / 2, -w / 2, -w / 2), rad, rad)
+
+        size = m.ICON_ACTION
+        x = (r.left() + m.PAD_CONTROL_X - m.GAP_RELATED if self.nav.expanded
+             else r.center().x() - size / 2)
+        box = QRectF(round(x), round(r.center().y() - size / 2), size, size)
+        tint = theme.color("primaryText" if selected else "label1")
+        icons.paint(painter, index.data(Qt.ItemDataRole.UserRole), box, tint, solid=selected)
+        if self.nav.expanded:
+            painter.setFont(theme.font(theme.TITLE if selected else theme.BODY))
+            painter.setPen(tint)
+            text = QRectF(box.right() + m.PAD_CONTROL_Y, r.top(),
+                          r.right() - box.right() - m.PAD_CONTROL_X, r.height())
+            painter.drawText(text, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                             index.data(Qt.ItemDataRole.DisplayRole))
+        painter.restore()
+
+
+class NavList(QListWidget):
+    """一级导航。选中项的底是一块会滑动的圆角块：换页时从旧项滑到新项。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setObjectName("NavList")
+        self.setProperty("ownFocusRing", True)
+        self.setAccessibleName("一级导航")
+        self.setFrameShape(QListWidget.Shape.NoFrame)
+        self.setMouseTracking(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.expanded = True
+        self.setItemDelegate(_NavDelegate(self))
+        for title, icon in _NAV:
+            item = QListWidgetItem(title)
+            item.setData(Qt.ItemDataRole.UserRole, icon)
+            self.addItem(item)
+        self._y = Anim(self, on_change=self.viewport().update)
+        self.currentRowChanged.connect(lambda _: self.glide())
+
+    def _row_rect(self) -> QRectF:
+        item = self.currentItem()
+        return QRectF(self.visualItemRect(item)).adjusted(0, 1, 0, -1) if item else QRectF()
+
+    def glide(self, instant: bool = False) -> None:
+        rect = self._row_rect()
+        if not rect.isEmpty():
+            self._y.to(rect.top(), "menu", instant=instant or not self.isVisible())
+
+    def set_expanded(self, expanded: bool) -> None:
+        self.expanded = expanded
+        # 收成竖栏时名字挪到 Tooltip 里（16.2：悬停显示名称）
+        for i in range(self.count()):
+            self.item(i).setToolTip("" if expanded else self.item(i).text())
+        self.doItemsLayout()
+        self.glide(instant=True)
+        self.viewport().update()
+
+    def resizeEvent(self, e) -> None:               # noqa: N802
+        super().resizeEvent(e)
+        self.glide(instant=True)
+
+    def showEvent(self, e) -> None:                 # noqa: N802
+        super().showEvent(e)
+        self.glide(instant=True)
+
+    def paintEvent(self, e) -> None:                # noqa: N802
+        rect = self._row_rect()
+        if not rect.isEmpty():
+            p = QPainter(self.viewport())
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(theme.color("fill8"))
+            rad = float(m.RADIUS_MENU)
+            p.drawRoundedRect(QRectF(rect.left(), self._y.value, rect.width(), rect.height()),
+                              rad, rad)
+            p.end()
+        super().paintEvent(e)
+
+
+# ----------------------------- 主窗口 ---------------------------------------
 class MainWindow(QMainWindow):
     # 工作线程 → 界面线程
-    sig_toast = Signal(str, str, str, int, object)
+    sig_toast = Signal(str, bool)
     sig_log = Signal(str)
     sig_watch_text = Signal(str)
     sig_link_text = Signal(str)
@@ -64,6 +176,7 @@ class MainWindow(QMainWindow):
         self._link: LinkServer | None = None
         self._capture: CaptureService | None = None
         self._quitting = False
+        self._expanded: bool | None = None
 
         # 判定数冻结的追踪状态，见 _track_freeze
         self._tick_last = JudgeCounts()
@@ -74,16 +187,19 @@ class MainWindow(QMainWindow):
         if icon is not None:
             self.setWindowIcon(icon)
 
-        # Mica 得在建窗口之前定：材质是 DWM 铺在窗口**后面**的，窗口自己那层
-        # 像素不透明就等于把它整个盖住。而透明是建窗口时才能定下来的属性，
-        # show 之后再设不生效。真正开材质在 _after_shown 里，那时才有 hwnd。
-        self._mica = winapi.supports_mica()
-        if self._mica:
+        # 透明属性**只能在建窗前设一次**，show() 之后改会重建原生窗口。
+        # 所以只要系统画得出 Mica 就一直设着；材质铺不上时由 AppRoot 的 opaque 属性铺实色。
+        self._mica_capable = winapi.supports_mica()
+        if self._mica_capable:
             self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        # Qt 自带的下拉、菜单「卷下来」效果会先在它自己的位置播一遍，再被挪走，看着是跳一下
+        for effect in (Qt.UIEffect.UI_AnimateCombo, Qt.UIEffect.UI_AnimateMenu,
+                       Qt.UIEffect.UI_FadeMenu):
+            QApplication.setEffectEnabled(effect, False)
 
         self._build_ui()
         self._wire_signals()
-        self.setMinimumSize(860, 520)
+        self.setMinimumSize(m.WINDOW_MIN_WIDTH, m.WINDOW_MIN_HEIGHT)
         self._fit_to_screen()
 
         self._game_timer = QTimer(self)
@@ -96,69 +212,57 @@ class MainWindow(QMainWindow):
 
     # ----------------------------- 组装 -------------------------------------
     def _build_ui(self) -> None:
-        central = QWidget()
-        # 画布底色画在这里，不靠 QMainWindow——见 ui/theme/qss.py 里那条注释
-        central.setObjectName("AppRoot")
-        row = QHBoxLayout(central)
+        root = QWidget()
+        root.setObjectName("AppRoot")
+        root.setProperty("opaque", "false" if self._mica_capable else "true")
+        row = QHBoxLayout(root)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(0)
 
-        sidebar = QWidget()
-        sidebar.setObjectName("Sidebar")
-        sidebar.setFixedWidth(_SIDEBAR_WIDTH)
-        side_box = QVBoxLayout(sidebar)
-        side_box.setContentsMargins(0, theme.GAP_GROUP, 0, theme.GAP_GROUP)
-        side_box.setSpacing(0)
-
-        self.nav = QListWidget()
-        self.nav.setObjectName("NavList")
-        self.nav.setFrameShape(QListWidget.Shape.NoFrame)
-        for text in ("配置", "统计", "运行"):
-            item = QListWidgetItem(text, self.nav)
-            # 不给行高，Qt 会按图标那一档算，选中的色块高得像块砖
-            item.setSizeHint(QSize(_SIDEBAR_WIDTH, _NAV_ROW_HEIGHT))
+        # 侧栏不单独铺底：桌面上直接露出 Mica，靠间距和页面分开，不画分割线（16.2）
+        self.nav_pane = QWidget()
+        self.nav_pane.setObjectName("NavPane")
+        side = QVBoxLayout(self.nav_pane)
+        side.setContentsMargins(m.GAP_INLINE, m.GAP_INLINE, m.GAP_INLINE, m.GAP_INLINE)
+        self.nav = NavList()
         self.nav.setCurrentRow(0)
         self.nav.currentRowChanged.connect(self._page_changed)
-        side_box.addWidget(self.nav)
-        side_box.addStretch(1)
-        row.addWidget(sidebar)
+        side.addWidget(self.nav)
+        row.addWidget(self.nav_pane)
 
         self.config_page = ConfigPage(self)
         self.stats_page = StatsPage(self)
         self.run_page = RunPage(self)
+        self.pages = (self.config_page, self.stats_page, self.run_page)
 
         self.stack = QStackedWidget()
         self.stack.setObjectName("ContentPane")
-        self.stack.addWidget(self.config_page)
-        self.stack.addWidget(self.stats_page)
-        self.stack.addWidget(self.run_page)
+        for page in self.pages:
+            self.stack.addWidget(page)
         row.addWidget(self.stack, 1)
 
-        self.setCentralWidget(central)
-        self.toast = Toast(central)
-        # 键盘焦点的可见指示。一个窗口一个，覆盖窗口里所有控件。
-        self._focus_ring = widgets.FocusRing(self)
+        self.setCentralWidget(root)
+        self.toast = Toast(root)
+        widgets.install_focus_tracker(QApplication.instance())
 
     def _fit_to_screen(self) -> None:
-        """默认尺寸按可用屏幕收一收，然后居中。
+        """默认 1120×760（逻辑像素），按可用屏幕收一收，然后居中。
 
-        1040×720 是**逻辑**像素。高缩放比的小屏上可用区可能只有 1280×680
-        （1920×1080 跑 150% 就是这个数），照搬会顶满整个高度、贴着任务栏。
-        居中是因为 Qt 的默认落点不居中，开窗位置每次都有点随机。
+        高缩放比的小屏上可用区可能只有 1280×680（1920×1080 跑 150%），照搬会顶满整个高度。
         """
         screen = self.screen() or QApplication.primaryScreen()
         if screen is None:
-            self.resize(1040, 720)
+            self.resize(m.WINDOW_WIDTH, m.WINDOW_HEIGHT)
             return
         avail = screen.availableGeometry()
-        self.resize(min(1040, int(avail.width() * 0.92)),
-                    min(720, int(avail.height() * 0.92)))
+        self.resize(min(m.WINDOW_WIDTH, int(avail.width() * 0.92)),
+                    min(m.WINDOW_HEIGHT, int(avail.height() * 0.92)))
         frame = self.frameGeometry()
         frame.moveCenter(avail.center())
         self.move(frame.topLeft())
 
     def _wire_signals(self) -> None:
-        self.sig_toast.connect(self._show_toast_now)
+        self.sig_toast.connect(lambda text, error: self.toast.show_message(text, error=error))
         self.sig_log.connect(self.run_page.append_log)
         self.sig_watch_text.connect(self.run_page.set_watch_text)
         self.sig_link_text.connect(self.run_page.set_link_text)
@@ -179,70 +283,103 @@ class MainWindow(QMainWindow):
         menu.addAction(show_action)
         menu.addSeparator()
         menu.addAction(quit_action)
+        menu.aboutToShow.connect(lambda: winapi.round_corners(int(menu.winId())))
         tray.setContextMenu(menu)
         tray.activated.connect(self._tray_activated)
         tray.show()
+        self._tray_menu = menu
         return tray
 
     def _after_shown(self) -> None:
-        """窗口摆出来之后再做的事：标题栏、Mica、首次运行向导、联动开关。"""
-        hwnd = int(self.winId())
+        """窗口摆出来之后再做的事：标题栏、材质、首次运行、联动开关。"""
+        self._apply_material()
         app = QApplication.instance()
-        # 标题栏归 DWM 管，Qt 的样式表刷不到那一条，得单独跟着主题走
-        winapi.set_titlebar_dark(hwnd, theme.is_dark())
-        if self._mica and not winapi.enable_mica(hwnd):
-            # 材质没铺上，而底色已经按「透得过去」配好了——再不换回来就是一片全黑
-            self._mica = False
-            if app is not None:
-                app.setStyleSheet(theme.stylesheet(mica=False))
         if app is not None:
             app.styleHints().colorSchemeChanged.connect(self._system_scheme_changed)
         self._ensure_game_root()
         self.apply_dghub_link()
 
-    # ----------------------------- 主题 -------------------------------------
+    # ----------------------------- 主题与材质 -------------------------------
+    def _apply_material(self) -> None:
+        """Mica 能铺就铺，铺不上（Windows 10、关了透明效果、高对比度）退回实色底（16.3）。
+
+        ⚠️ Mica 是两步：声明材质 + 把玻璃摊进客户区，``winapi.enable_mica`` 里两步都做了。
+        DWM 返回成功只说明请求被接受，验收要看真实桌面截图。
+        """
+        hwnd = int(self.winId())
+        winapi.set_titlebar_dark(hwnd, theme.is_dark())
+        want = (self._mica_capable and winapi.transparency_enabled()
+                and not winapi.high_contrast())
+        on = want and winapi.enable_mica(hwnd)
+        if self._mica_capable and not on:
+            winapi.disable_mica(hwnd)
+        root = self.centralWidget()
+        root.setProperty("opaque", "false" if on else "true")
+        root.style().unpolish(root)
+        root.style().polish(root)
+        root.update()
+
     def _system_scheme_changed(self, _scheme) -> None:
-        """系统切了深浅。只有「跟随系统」时才跟着动。"""
         if theme.follows_system():
             self.apply_appearance()
 
+    def nativeEvent(self, event_type, message):     # noqa: N802
+        if event_type == b"windows_generic_MSG":
+            import ctypes
+            from ctypes import wintypes
+            msg = ctypes.cast(int(message), ctypes.POINTER(wintypes.MSG)).contents
+            if msg.message in (_WM_SETTINGCHANGE, _WM_THEMECHANGED):
+                # 系统设置变化的消息一次会来好几条，等它停下再刷一次
+                QTimer.singleShot(120, self.apply_appearance)
+        return super().nativeEvent(event_type, message)
+
     def apply_appearance(self) -> None:
-        """按配置里的 appearance 重新定模式，并把整套外观刷一遍。"""
+        """按配置重定深浅，重读系统的文本大小和动画设置，就地重新上色（不重建页面）。"""
         theme.set_appearance(self.cfg.appearance)
         app = QApplication.instance()
         if app is not None:
-            theme.apply(app, mica=self._mica)
-        winapi.set_titlebar_dark(int(self.winId()), theme.is_dark())
-        # 自绘的部件和用代码设过的字体不吃样式表，得自己再取一遍
-        theme.apply_shadow(self.toast)
-        self.stats_page.retheme()
-        self.run_page.retheme()
+            theme.apply(app)
+        widgets.restyle_tree(self)
+        self._apply_material()
 
+    # ----------------------------- 导航 -------------------------------------
+    def _page_changed(self, index: int) -> None:
+        if index < 0:
+            return
+        target = self.pages[index]
+        if self.stack.currentWidget() is not target and self.isVisible():
+            widgets.fade_in(target)
+        self.stack.setCurrentWidget(target)
+        if target is self.stats_page:
+            self.stats_page.refresh()
+
+    def resizeEvent(self, event) -> None:            # noqa: N802
+        super().resizeEvent(event)
+        self.toast.parent_resized()
+        width = self.centralWidget().width() or self.width()
+        expanded = width >= m.BREAK_EXPANDED
+        if expanded == self._expanded:
+            return
+        self._expanded = expanded
+        self.nav_pane.setFixedWidth(m.NAV_EXPANDED if expanded else m.NAV_RAIL)
+        self.nav.set_expanded(expanded)
+        margin = m.PAGE_MARGIN_EXPANDED if expanded else m.PAGE_MARGIN_MEDIUM
+        for page in self.pages:
+            page.set_margin(margin)
+
+    # ----------------------------- 窗口行为 ---------------------------------
     def _ensure_game_root(self) -> None:
-        """还不知道截图目录在哪就弹一次向导。"""
+        """还不知道截图目录在哪就问一次。"""
         if self.cfg.screenshots_dir:
             return
         root = ask_for_game_root(self.cfg, self)
         if root is None:
-            self.show_toast("还没设置游戏目录",
-                            "去「配置 → 目录」里选一下，不然没有截图可以扫。",
-                            Toast.WARNING)
+            self.show_toast("未设置游戏目录，可以在“配置”页补上")
             return
         config_mod.apply_game_root(self.cfg, root)
         config_mod.save(self.cfg)
         self.config_page.refresh_paths()
         self.run_page.refresh_start_bat()
-        self.show_toast("已设置游戏目录", str(root), Toast.SUCCESS)
-
-    def _page_changed(self, index: int) -> None:
-        self.stack.setCurrentIndex(index)
-        if index == 1:
-            self.stats_page.refresh()
-
-    # ----------------------------- 窗口行为 ---------------------------------
-    def resizeEvent(self, event) -> None:            # noqa: N802
-        super().resizeEvent(event)
-        self.toast.parent_resized()
 
     def closeEvent(self, event) -> None:             # noqa: N802
         """监视还在跑就缩托盘，没在跑就真退出。"""
@@ -252,7 +389,7 @@ class MainWindow(QMainWindow):
             return
         event.ignore()
         self.hide()
-        self._tray.showMessage(APP_NAME, "已最小化到托盘，继续后台监视。",
+        self._tray.showMessage(APP_NAME, "已最小化到托盘，继续在后台监视",
                                QSystemTrayIcon.MessageIcon.Information, 3000)
 
     def _tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
@@ -290,7 +427,7 @@ class MainWindow(QMainWindow):
         if not self.watcher_running:
             self.toggle_watch()
         self.hide()
-        self._tray.showMessage(APP_NAME, "已随游戏启动，后台监视中。",
+        self._tray.showMessage(APP_NAME, "已随游戏启动，正在后台监视",
                                QSystemTrayIcon.MessageIcon.Information, 3000)
 
     # ----------------------------- 选择器 -----------------------------------
@@ -302,43 +439,23 @@ class MainWindow(QMainWindow):
         return path
 
     # ----------------------------- 提示 -------------------------------------
-    def show_toast(self, title: str, message: str, severity: str = Toast.INFO,
-                   duration_ms: int = 0, action: tuple[str, object] | None = None) -> None:
-        """线程安全：后台线程也能调，走信号回界面线程。
-
-        ``duration_ms`` 留 0 就用 Toast 的默认时长；错误和带动作的提示不自动消失。
-        """
-        self.sig_toast.emit(title, message, severity, duration_ms, action)
-
-    def _show_toast_now(self, title: str, message: str, severity: str,
-                        duration_ms: int, action) -> None:
-        self.toast.show_toast(title, message, severity, duration_ms or None, action)
+    def show_toast(self, text: str, *, error: bool = False,
+                   action: tuple[str, object] | None = None) -> None:
+        """底部提示。带动作的（撤销）只能在界面线程里调；后台线程走 ``sig_toast``。"""
+        if action is not None:
+            self.toast.show_message(text, error=error, action=action)
+        else:
+            self.sig_toast.emit(text, error)
 
     # ----------------------------- 配置 -------------------------------------
-    def save_instant_settings(self) -> None:
-        """开关、单选和选择器改完立刻落盘。
-
-        **只收即时字段**：目录、端口、秒数和得分区间属于要明确提交的输入，
-        不能被一次开关切换顺手写进去。
-        """
-        self.config_page.read_instant_into(self.cfg)
+    def save_settings(self) -> None:
+        """设置改完立即写盘，并让依赖它的后台服务跟上（DESIGN.md 11.2）。"""
         config_mod.save(self.cfg)
         self.apply_dghub_link()
 
-    def save_config_from_ui(self) -> None:
-        self.config_page.read_into(self.cfg)
-        config_mod.save(self.cfg)
-        self.apply_dghub_link()
-        self.run_page.refresh_start_bat()
-        self.show_toast("已保存", f"配置已写入 {paths.config_path()}", Toast.SUCCESS)
-
-    def apply_and_rescan(self) -> None:
-        self.save_config_from_ui()
-        # 全量扫描远超 2 秒，按钮要进 Loading 并给文字状态：
-        # 不然连点会起好几个扫描线程去抢同一批文件。
+    def rescan(self) -> None:
+        # 全量扫描远超 2 秒，按钮要进 Loading：不然连点会起好几个扫描线程去抢同一批文件
         self.config_page.set_scanning(True)
-        self.show_toast("正在重新扫描", "按当前规则重建输出文件夹，可以继续用其他页面",
-                        Toast.INFO)
 
         def work() -> None:
             try:
@@ -353,22 +470,20 @@ class MainWindow(QMainWindow):
         self.config_page.set_scanning(False)
         self.stats_page.refresh()
         if result.error:
-            self.show_toast("扫描出错", result.error, Toast.ERROR)
+            self.show_toast(f"扫描失败：{result.error}", error=True)
         else:
-            self.show_toast("扫描完成",
-                            f"寸 {result.cun} 张 · AJ {result.aj} 张 · 共 {result.total} 张",
-                            Toast.SUCCESS)
+            self.show_toast(f"已扫描 {result.total:,} 张 ｜ 寸 {result.cun} ｜ AJ {result.aj}")
 
     def open_output(self) -> None:
         directory = self.cfg.output_root
         if not directory:
-            self.show_toast("打开失败", "输出目录还没配置", Toast.ERROR)
+            self.show_toast("未设置输出目录，先在上面选一个", error=True)
             return
         try:
             Path(directory).mkdir(parents=True, exist_ok=True)
             os.startfile(directory)                 # noqa: S606 - 就是要交给资源管理器
         except OSError as e:
-            self.show_toast("打开失败", str(e), Toast.ERROR)
+            self.show_toast(f"无法打开输出目录：{e}", error=True)
 
     def on_mode_changed(self, mode: str) -> None:
         self.cfg.process_mode = mode
@@ -388,13 +503,13 @@ class MainWindow(QMainWindow):
             return
 
         if not self.cfg.screenshots_dir:
-            self.show_toast("还没设置截图目录", "去「配置 → 目录」里选一下。", Toast.WARNING)
+            self.show_toast("未设置截图目录，先在“配置”页选择", error=True)
             return
 
         self._watcher = Watcher(
             get_cfg=config_mod.load_cached,
             engine=self.ocr,
-            on_match=lambda f, rec, m: self.sig_match.emit(f, rec, m),
+            on_match=lambda f, rec, hits: self.sig_match.emit(f, rec, hits),
             on_status=lambda s: self.sig_watch_text.emit(s),
         )
         self._watcher.start()
@@ -402,9 +517,12 @@ class MainWindow(QMainWindow):
 
     def _on_match_ui(self, filename: str, rec: OcrRecord, matches: list[Category]) -> None:
         keys = "+".join(c.key for c in matches)
-        self.run_page.append_log(
-            f"✓ {filename}  得分={rec.score} A={rec.attack} M={rec.miss}  [{keys}]")
+        score = f"{rec.score:,}" if rec.score is not None else "?"
+        self._log(f"命中  {filename}  {score}  A{rec.attack} M{rec.miss}  {keys}")
         self.stats_page.refresh()
+
+    def _log(self, text: str) -> None:
+        self.sig_log.emit(f"{datetime.now():%H:%M:%S}  {text}")
 
     def _update_game_label(self) -> None:
         running = winapi.is_process_running(self.cfg.game_process)
@@ -414,7 +532,7 @@ class MainWindow(QMainWindow):
     def apply_dghub_link(self) -> None:
         """按配置起停内存读取和它的两个消费者（联动数据服务、自动截图）。
 
-        启动时和每次保存配置后都会调，所以开关是立即生效的。
+        启动时和每次改完设置都会调，所以开关是立即生效的。
         """
         want_link = self.cfg.dghub.enabled
         want_capture = self.cfg.capture.enabled
@@ -452,7 +570,7 @@ class MainWindow(QMainWindow):
 
     def _on_capture_status(self, message: str) -> None:
         classifier.log("[CAPTURE] " + message)       # 落盘，方便事后核对时序
-        self.sig_log.emit("📸 " + message)
+        self._log("截图  " + message)
 
     def _on_tick(self, counts: JudgeCounts) -> None:
         if self._link is not None:
@@ -523,7 +641,7 @@ class MainWindow(QMainWindow):
         summary = f"得分≈{score} {rank} A{final.attack}M{final.miss}"
         verdict = keys if matches else "未寸"
         classifier.log(f"[SETTLE] {summary} [{verdict}]")
-        self.sig_log.emit(f"🏁 结算 {summary}  [{verdict}]")
+        self._log(f"结算  {score:,}  {rank}  A{final.attack} M{final.miss}  {verdict}")
 
         if cfg.capture.enabled and self._capture is not None:
             self._capture.request_capture(final)

@@ -47,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
     # 深浅模式要在建窗口之前定下来，不然第一帧会闪一下另一套底色。
     # 跟随系统时读 Qt 的 colorScheme()，所以必须在 QApplication 之后。
     theme.set_appearance(config_mod.load_cached().appearance)
-    theme.apply(app, mica=winapi.supports_mica())
+    theme.apply(app)
 
     window = MainWindow()
     window.show()

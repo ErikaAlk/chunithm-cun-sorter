@@ -12,9 +12,11 @@ Claude 在本仓库（寸录 / chunithm-cun-sorter）工作时的约定与速查
   安装包文件名、控制面板里的卸载项；`APP_NAME` 供窗口标题、托盘、exe 文件名、快捷方式、
   自启注册表值名。别在别处再写一份。
 - 发版时一并更新 README 里的版本号与安装包文件名。
-- **界面改动先读 `~\.claude\DESIGN.md`**。本项目遵循的规范版本记在
-  `ui/theme/tokens.py` 的 `DESIGN_SYSTEM_REVISION`，当前是 `2026.08.31-a11y-baseline`。
-  项目覆盖全局默认的地方全部登记在同文件的 `OVERRIDES` 里，加覆盖要连原因一起写。
+- **界面改动先读 `~\.claude\DESIGN.md`**（第 16 章是电脑端）。本项目遵循的规范版本记在
+  `ui/theme/tokens.py` 的 `DESIGN_SYSTEM_REVISION`，当前是 `2026.09.26-coloros17`。
+  颜色是设计库 `~\Workspace\code\coloros-ui-kit	okens\coloros17.json` 的原值（COUI 橙主题），
+  和设计库、规范默认不一样的地方全部登记在同文件的 `OVERRIDES` 里，加覆盖要连原因一起写。
+  写法参照同一章的样板 `~\Workspace\lab\pc-design-sample\desktop\`。
 
 ## 这是什么
 
@@ -31,15 +33,18 @@ v2.0 之前是 WinUI 3 / .NET 8（`CunSorter/`），已整体删除；再往前 
 ```
 main.py            界面入口（--watch 随游戏启动）    cli.py   命令行入口
    ↓                                                    ↓
-ui/main_window.py  主窗口：导航 + 三页 + 托盘 + 服务生命周期
+ui/main_window.py  主窗口：侧栏 + 三页 + 托盘 + 材质 + 服务生命周期
    ↓ 用
-ui/page_config.py / page_stats.py / page_run.py / first_run.py / rule_dialog.py
+ui/page_config.py / page_stats.py / page_run.py / first_run.py / rule_dialog.py（后两个是面板）
    ↓ 都用
-ui/theme/          主题入口，下分四个模块       ui/widgets.py  焦点环、开关、分段、卡片、曲线、浮条
-   ├ tokens.py     固化色板（Light / Dark 两套，纯数据、不依赖 Qt）
-   ├ metrics.py    字号 / 间距 / 圆角 / 动效 / 阴影 / 材质，全是单值
-   ├ qss.py        语义 Token → QSS，唯一拼样式表的地方
-   └ __init__.py   门面：当前模式、取色、取字体、接系统设置
+ui/widgets.py      弹簧动画、焦点环、胶囊按钮 / 输入 / 下拉、开关、卡片与设置行、页面骨架、
+                   Toast、居中面板、曲线           ui/icons.py  QPainterPath 现画的图标
+ui/theme/          主题入口
+   ├ tokens.py     颜色（设计库原值，Light / Dark 两套，纯数据、不依赖 Qt）
+   ├ metrics.py    字阶 / 间距 / 圆角 / 尺寸 / 弹簧 / 阴影（16 章键鼠密度，纯数据）
+   ├ spring.py     COUI 弹簧的解析解，纯 Python
+   ├ qss.py        颜色与字阶 → QSS，唯一拼样式表的地方
+   └ __init__.py   门面：当前模式、取色、蒙层合成、取字体、接系统设置
    ↓
 core/classifier.py 判定 / 复制 / 整理 / 扫描 / 缓存 / 统计   ←── 两个前端共用
    ↓ 用
@@ -87,36 +92,38 @@ core/winapi.py     ctypes 封装：进程 / 窗口 / 抓帧 / 单实例 / DPI
    排版角色是**逻辑像素**——Qt 6 的高 DPI 缩放会按显示缩放自己放大，这正是规范说的
    「默认系统缩放下的逻辑尺寸」。写 `pt` 会让 Qt 在 Windows 上按 96 DPI 换算，13 变成 17，
    整屏字大三分之一、行还会被挤塌（v2.0 就是这样）。
-   Windows 辅助功能里的「放大文本」是**另一个**设置，Qt 不管，`theme.font()` 自己乘一次
-   ——规范要求系统字体缩放只应用一次，那就是唯一那一次，别在别处再乘。
-   组标题必须比行标题大且 Semibold（14 / `text.primary`），规范点名禁止做成 caption 或弱灰。
+   Windows 辅助功能里的「文本大小」是**另一个**设置，Qt 不管，`theme.font()` 和 QSS 的字号
+   各自乘一次同一个系数——规范要求系统字体缩放只应用一次，别在别处再乘。
 9. **Mica 是两步，少一步等于没开。** `DwmSetWindowAttribute(DWMWA_SYSTEMBACKDROP_TYPE)`
    之后必须再调 `DwmExtendFrameIntoClientArea` 传四边 `-1`，否则材质只铺在标题栏那一条，
    客户区毫无变化——而属性回读还是成功的（`hr=S_OK, value=2`），光看返回值查不出来。
    验收要用**屏幕**截图：`PrintWindow` 抓的是窗口自己画的那层，抓不到 DWM 铺在后面的材质。
    另外**窗口自己不画底色**。 材质是 DWM 铺在窗口**后面**的，窗口那层像素不透明就等于
-   把它整个盖住，看上去毫无变化。所以 `stylesheet(mica=True)` 里 `QMainWindow` 和侧栏是
-   `transparent`，其余各层半透明。两条连带的约束：`WA_TranslucentBackground` 必须在 `show()`
-   **之前**设，之后设不生效；而材质一旦没铺上（`enable_mica` 返回 False），底色必须换回不透明
-   那套，否则是一片全黑——`_after_shown` 里有这条回退，别删。
-   ⚠️ **但那条回退只在底色画在 `QWidget#AppRoot` 上时才真的有效。**
-   窗口一旦设过 `WA_TranslucentBackground`，`QMainWindow` 自己的 QSS 背景就**不画了**
-   （实测：同一份样式表，非透明窗口取到 `#120F0C`，透明窗口取到 alpha=0），
-   而那个属性 `show()` 之后撤不掉。所以画布底色画在中央容器上，不靠 `QMainWindow`。
+   把它整个盖住，看上去毫无变化。所以 `AppRoot`、侧栏、页面都是 `transparent`，卡片按设计库
+   直接放在 Mica 上（暗色卡片本身是 10% 白）。`WA_TranslucentBackground` 必须在 `show()`
+   **之前**设，之后设或撤都会重建原生窗口，所以只要系统画得出 Mica 就一直设着；材质铺不上
+   （Windows 10、关了透明效果、高对比度，见 `MainWindow._apply_material`）时给 `AppRoot`
+   设 `opaque="true"`，QSS 按它铺 `bgGrouped` 实色，否则是一片全黑。
+   ⚠️ **底色必须画在 `QWidget#AppRoot` 上。** 窗口一旦设过 `WA_TranslucentBackground`，
+   `QMainWindow` 自己的 QSS 背景就**不画了**（实测：同一份样式表，非透明窗口取到实色，
+   透明窗口取到 alpha=0）。
    Mica 的色调**跟随窗口自己的深浅属性**，不是系统的——已实测：系统深色、应用强制浅色时
    材质也是浅的，所以不需要「两者不一致就关材质」的回退。
 
-10. **Light 与 Dark 的 Token 键集合必须完全一致，对比度按「文字承载面集合」逐一校验。**
-    少一个键就是那个模式下 KeyError，或者更糟——QSS 里静默变成空串，界面塌了却不报错。
-    承载面有十一个（四个 Surface + `fill.control` + `accent.subtle` + 四个语义 `subtle`），
-    只对 `canvas` 校一次会放过一批实际读不清的组合：候选色板的 `text.tertiary` 对 canvas
-    有 4.45:1，对 `fill.control` 就不够。→ 测试
-    `test_light_and_dark_define_exactly_the_same_tokens`、
-    `test_neutral_text_is_readable_on_every_text_bearing_surface`
+10. **Light 与 Dark 的颜色键集合必须完全一致，颜色取设计库原值，对比度按合成后的颜色校验。**
+    少一个键就是那个模式下 KeyError。设计库里很多颜色带透明度（暗色卡片是 10% 白），
+    要叠到实际底色上再算对比度：页面底、卡片、内容面、浮层、面板、面板里的卡片各算一遍。
+    设计库原值里有两处不到 4.5:1（label2 叠在亮色 #F0F1F2 上 4.46、白字配 COUI 橙 2.66），
+    照原样用、登记在 `OVERRIDES`，测试守着不许再往下掉。→ `tests/test_theme.py`
+    （设计库在本机时还会逐项比对颜色和弹簧参数，CI 上跳过）
 
-11. **业务代码不许散写 Hex、字号、间距、圆角、阴影和动画时长。** 全部走 `ui/theme`。
-    自绘控件（Switch、Segmented、Combo 的箭头、DailyChart）尤其容易漏——v2.0 的
-    `DailyChart` 就写死了 `QColor(235, 235, 245, 77)` 这种只在深色下成立的值。
+11. **业务代码不许散写 Hex、字号、间距、圆角、阴影和动画时长。** 全部走 `ui/theme`，
+    动画一律用 `widgets.Anim` 跟 COUI 弹簧走，不写固定时长的 ease。自绘控件（开关、下拉、
+    图标、DailyChart）尤其容易漏——v2.0 的 `DailyChart` 就写死过只在深色下成立的颜色。
+12. **设置改完立即生效并保存，页面上没有「保存」按钮。** 开关、选择器、目录选择当场写盘，
+    数字框敲完（回车或离开）写盘；判定规则是多字段表单，放在面板里「取消 / 完成」明确提交。
+    搭界面时的程序化置位不能写盘（`ConfigPage._loading`、`RunPage._initializing` 两道闸）。
+    → `tests/test_ui.py`
 
 ## 会浪费半小时的坑
 
@@ -140,29 +147,33 @@ core/winapi.py     ctypes 封装：进程 / 窗口 / 抓帧 / 单实例 / DPI
 - **`_ocr()` 不负责关 PIL 图像**：第二行可能要换个 psm 再喂一次，提前关掉就 `ValueError:
   Operation on closed image`。生命周期由 `detect()` 管。
 - **QSS 不支持 `outline` / `outline-offset`。** 属性被静默忽略，一个像素都不画（实测）。
-  焦点环由 `ui/widgets.py` 的 `FocusRing` 画：一个跟随焦点的覆盖层，`setParent` 到获得焦点
-  那个控件的父级，于是被同样的祖先裁剪，滚出可视区会跟着消失。别在 QSS 里加 `:focus` 边框
-  「补救」——那会让控件获得焦点时跳一下，还和环叠在一起。测试钉着这条。
-- **QSS 也不认 `line-height`，但 Qt 的富文本引擎认。** 会换行的标签（组级说明）用
-  `theme.rich_text()` 包一层 `<div style="line-height:…">`，实测 200px 宽的标签从 26 高
-  变成 56 高。包之前必须转义，路径里的 `&` 不转义会被当成 HTML 实体吃掉。
-- **`QButtonGroup.idClicked` 只在用户点击时发，程序化 `setChecked` 不发。**
-  `Segmented` 靠这个区分「用户改的」和「重建界面时置的」，自动保存不会被构建过程触发。
-  但 `Switch.toggled` **会**被程序化置位触发，所以 `ConfigPage` 有个 `_loading` 闸，
-  `RunPage` 有个 `_initializing` 闸。
+  焦点环由 `ui/widgets.py` 的 `FocusTracker` 画：一层盖在窗口上的覆盖部件，只在键盘操作
+  （或点进输入框）时出现，颜色 `focusRing`。别在 QSS 里加 `:focus` 边框「补救」——
+  那会让控件获得焦点时跳一下，还和环叠在一起。测试钉着这条。
+- **QSS 的 `border-radius` 不做抗锯齿**，32 高的胶囊边缘全是台阶。所以按钮、输入框、下拉框、
+  开关、卡片都在 `paintEvent` 里自己画；交互、键盘和朗读仍是原生控件的。
+- **`Switch.toggled` 会被程序化 `setChecked` 触发**，所以 `ConfigPage` 有个 `_loading` 闸，
+  `RunPage` 有个 `_initializing` 闸，搭界面时的置位不写盘。
+- **Qt 自带的下拉、菜单「卷下来」效果会和自己的弹出动画叠在一起**：先在 Qt 的默认位置卷一遍，
+  再被挪到该在的地方，看着是跳一下。`MainWindow` 里把 `UI_AnimateCombo` / `UI_AnimateMenu` /
+  `UI_FadeMenu` 关掉了。
+- **`QLayout.totalHeightForWidth()` 在布局里没有折行控件时返回 -1**，拿它给面板卡片定高，
+  卡片就是 0 高、只剩一道阴影。`Panel.run()` 先看 `hasHeightForWidth()`。
+- **包里的函数别和子模块同名。** `ui/theme/__init__.py` 里曾有个 `def qss()`，它把同名子模块
+  `ui.theme.qss` 盖掉了，`from ui.theme import qss` 拿到的是函数。门面里叫 `qss_color()`。
 - **别在仓库根放 `cun_config.json`。** 源码运行时 `portable_dir()` 会往上找到它，
   整个程序误判成便携部署，截图目录被推到仓库旁边去。`_fill_paths` 里有一道守卫，别拿掉。
 - **`installer.iss` 必须存成 UTF-8 with BOM**，否则 ISCC 按 ANSI 读，中文全是乱码。
 - **别拿 `setMinimumHeight` 给一行定高。** Qt 的 `qSmartMinSize` 里显式设过的最小高度会
   **顶掉**布局算出来的那个，于是空间一紧，这一行会被压到比内容还矮、子部件叠在一起。
-  地板要加在里面的标签上，行本身用纵向 `Fixed`（`ui/widgets.py` 的 `Row`）。
+  高度由文字列的上下内边距撑出来，行本身用纵向 `Fixed`（`ui/widgets.py` 的 `SettingRow`）。
 - **卡片行里的副标题不能用会换行的 QLabel。** 换行标签的高度取决于宽度，窗口一窄就悄悄折成
   两三行，把整行顶高、连累同一张卡片里别的行。用 `widgets.ElidedLabel`（不换行，放不下从
   中间省略）。同理，会换行的标签放进 `QHBoxLayout` 只拿得到自己 sizeHint 那么宽，右边空着
   也不用——「统计」页顶部那行就这么折过。
-- **`QComboBox::drop-down` 一styled，Windows 样式就不画箭头了**，下拉框看着和只读输入框
-  一模一样。QSS 里拿边框拼三角在 Qt 里会画成一个实心方块。箭头是 `widgets.Combo` 在
-  `paintEvent` 里自己描的，应用内的下拉框都要用这个类。
+- **下拉框一律用 `widgets.ComboBox`**：整个控件（当前值 + 箭头）自己画，弹出列表的每一行由
+  `_PopupDelegate` 照 ColorOS 菜单画，弹出位置离控件 8、设置行尾的右对齐。
+  外层 `QComboBoxPrivateContainer` 的边框要在 QSS 里清掉，不然多一圈方框。
 - **CI 的检出路径里带着仓库名**：`D:\a\chunithm-cun-sorter\chunithm-cun-sorter\`。
   所以测试里别去数 `chunithm-cun-sorter` 出现了几次——插进 start.bat 的那行自带程序路径，
   在 runner 上一行就有三个，本地零个。认注入行要按行首 `start "标记"`。

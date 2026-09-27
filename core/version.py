@@ -4,7 +4,7 @@
 打包脚本、安装器文件名、控制面板里的卸载项版本全部从这里读，别在别处再写一份。
 """
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 
 APP_NAME = "寸录"
 APP_SLUG = "chunithm-cun-sorter"

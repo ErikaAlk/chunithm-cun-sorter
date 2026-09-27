@@ -55,6 +55,12 @@ _BUILD_BACKDROP = 22621
 _BUILD_WIN11 = 22000
 #: SystemParametersInfo 的 SPI_GETCLIENTAREAANIMATION，「减少动态效果」的取反
 SPI_GETCLIENTAREAANIMATION = 0x1042
+SPI_GETHIGHCONTRAST = 0x0042
+HCF_HIGHCONTRASTON = 0x00000001
+DWMSBT_NONE = 1
+#: 弹出菜单这类独立小窗口用系统圆角（Windows 11）
+DWMWA_WINDOW_CORNER_PREFERENCE = 33
+DWMWCP_ROUND = 2
 
 
 class PROCESSENTRY32W(ctypes.Structure):
@@ -89,6 +95,11 @@ class BITMAPINFOHEADER(ctypes.Structure):
         ("biXPelsPerMeter", ctypes.c_long), ("biYPelsPerMeter", ctypes.c_long),
         ("biClrUsed", wintypes.DWORD), ("biClrImportant", wintypes.DWORD),
     ]
+
+
+class HIGHCONTRASTW(ctypes.Structure):
+    _fields_ = [("cbSize", wintypes.UINT), ("dwFlags", wintypes.DWORD),
+                ("lpszDefaultScheme", wintypes.LPWSTR)]
 
 
 class BITMAPINFO(ctypes.Structure):
@@ -291,24 +302,33 @@ def set_app_user_model_id(app_id: str) -> None:
         pass
 
 
-def set_titlebar_dark(hwnd: int, dark: bool) -> None:
-    """标题栏跟着应用主题走。
-
-    以前这里写死开深色。加了浅色主题之后再写死，就会出现深色标题栏配浅色
-    客户区——非客户区归 DWM 管，Qt 的样式表刷不到那一条。
-    """
+def _dwm_set(hwnd: int, attr: int, value: int) -> bool:
+    """``DwmSetWindowAttribute`` 设一个 int 属性。返回 0 只说明请求被接受，不等于桌面上真的变了。"""
     if not _IS_WINDOWS or not hwnd:
-        return
+        return False
     try:
         dwmapi = ctypes.WinDLL("dwmapi")
         dwmapi.DwmSetWindowAttribute.argtypes = [
             wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
-        value = ctypes.c_int(1 if dark else 0)
-        dwmapi.DwmSetWindowAttribute(
-            wintypes.HWND(hwnd), DWMWA_USE_IMMERSIVE_DARK_MODE,
-            ctypes.byref(value), ctypes.sizeof(value))
+        dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
+        arg = ctypes.c_int(value)
+        return dwmapi.DwmSetWindowAttribute(
+            wintypes.HWND(hwnd), attr, ctypes.byref(arg), ctypes.sizeof(arg)) == 0
     except (OSError, AttributeError):
-        pass
+        return False
+
+
+def set_titlebar_dark(hwnd: int, dark: bool) -> None:
+    """标题栏跟着应用主题走。非客户区归 DWM 管，Qt 的样式表刷不到那一条。"""
+    _dwm_set(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, 1 if dark else 0)
+
+
+def round_corners(hwnd: int) -> bool:
+    """弹出菜单、下拉列表这类顶层小窗口用 Windows 11 的系统圆角。
+
+    QSS 的圆角对顶层窗口无效，窗口本身还是方的。Windows 10 上静默失败。
+    """
+    return _dwm_set(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND)
 
 
 def apps_use_light_theme() -> bool | None:
@@ -342,6 +362,37 @@ def text_scale_factor() -> float:
     except (OSError, ValueError, TypeError):
         return 1.0
     return min(2.25, max(1.0, percent / 100.0))
+
+
+def transparency_enabled() -> bool:
+    """「设置 → 个性化 → 颜色 → 透明效果」。缺键时按开启处理，和系统默认一致。
+
+    关掉之后 DWM 照样接受 Mica 请求，但画出来是一块系统灰，不是我们的底色，
+    所以要主动退回实色（DESIGN.md 16.3）。
+    """
+    if not _IS_WINDOWS or winreg is None:
+        return False
+    try:
+        with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as key:
+            return bool(winreg.QueryValueEx(key, "EnableTransparency")[0])
+    except (OSError, ValueError):
+        return True
+
+
+def high_contrast() -> bool:
+    """系统开了高对比度主题。材质要让位。"""
+    if not _IS_WINDOWS:
+        return False
+    try:
+        hc = HIGHCONTRASTW(ctypes.sizeof(HIGHCONTRASTW), 0, None)
+        if user32.SystemParametersInfoW(SPI_GETHIGHCONTRAST, ctypes.sizeof(hc),
+                                        ctypes.byref(hc), 0):
+            return bool(hc.dwFlags & HCF_HIGHCONTRASTON)
+    except (OSError, AttributeError):
+        pass
+    return False
 
 
 def animations_enabled() -> bool:
@@ -421,27 +472,28 @@ def enable_mica(hwnd: int) -> bool:
     build = windows_build()
     if build < _BUILD_WIN11:
         return False
+    attr, value = ((DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_MAINWINDOW)
+                   if build >= _BUILD_BACKDROP else (DWMWA_MICA_EFFECT, 1))
+    if not _dwm_set(hwnd, attr, value):
+        return False
     try:
         dwmapi = ctypes.WinDLL("dwmapi")
-        dwmapi.DwmSetWindowAttribute.argtypes = [
-            wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
-        dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
         dwmapi.DwmExtendFrameIntoClientArea.argtypes = [
             wintypes.HWND, ctypes.POINTER(_MARGINS)]
         dwmapi.DwmExtendFrameIntoClientArea.restype = ctypes.c_long
-
-        attr, value = ((DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_MAINWINDOW)
-                       if build >= _BUILD_BACKDROP else (DWMWA_MICA_EFFECT, 1))
-        arg = ctypes.c_int(value)
-        if dwmapi.DwmSetWindowAttribute(
-                wintypes.HWND(hwnd), attr, ctypes.byref(arg), ctypes.sizeof(arg)) != 0:
-            return False
-
         margins = _MARGINS(-1, -1, -1, -1)
         return dwmapi.DwmExtendFrameIntoClientArea(
             wintypes.HWND(hwnd), ctypes.byref(margins)) == 0
     except (OSError, AttributeError):
         return False
+
+
+def disable_mica(hwnd: int) -> None:
+    """撤掉 Mica（关了透明效果、开了高对比度时）。窗口底由调用方换回实色。"""
+    if windows_build() >= _BUILD_BACKDROP:
+        _dwm_set(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_NONE)
+    else:
+        _dwm_set(hwnd, DWMWA_MICA_EFFECT, 0)
 
 
 def set_dpi_awareness() -> None:

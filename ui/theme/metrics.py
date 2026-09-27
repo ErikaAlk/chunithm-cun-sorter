@@ -1,18 +1,16 @@
 # -*- coding: utf-8 -*-
-"""字号、间距、圆角、动效、阴影。**纯数据，不 import PySide6。**
+"""字阶、间距、圆角、尺寸、动效、阴影。**纯数据，不 import PySide6。**
 
-每一项都是解析后的**单值**，不留区间。规范的「实现前解析门槛」要求主题文件里
-不出现数值区间、``auto``、``TBD``、「按需」「适量」这类占位。
+数值是全局 DESIGN.md 第 16 章的键鼠密度（电脑端比手机的 COUI 原尺寸收一档：按钮 32、
+设置行 40 / 58、字号 14 / 12），字阶取自 COUI。带 ``KIT`` 注释的动效参数和设计库
+``coloros17.json`` 逐项比对（``tests/test_theme.py``）。
 
 ⚠️ **字号一律按像素给**（``setPixelSize`` / QSS 的 ``px``）。这里的数字是**逻辑**
-像素：Qt 6 的高 DPI 缩放会把它们按显示缩放放大，所以 13 在 150% 屏上渲染成
-19.5 物理像素，符合规范「所有尺寸均为默认系统缩放下的逻辑尺寸」。
-写 ``pt`` 会让 Qt 在 Windows 上按 96 DPI 换算，13 变成 17，整屏字大一圈、
-行被挤到标签和副标题叠在一起（v2.0 就是这样）。
+像素：Qt 6 的高 DPI 缩放会把它们按显示缩放放大。写 ``pt`` 会让 Qt 在 Windows 上
+按 96 DPI 换算，14 变成 18，整屏字大一圈（v2.0 就是这样）。
 
-Windows 的辅助功能「放大文本」是**另一个**设置，Qt 不会自动应用。
-:func:`ui.theme.font` 读一次系统的 TextScaleFactor 自己乘上去——规范要求
-「系统字体缩放只能由框架应用一次」，Qt 没应用，所以由我们应用，只此一处。
+Windows 的辅助功能「文本大小」是**另一个**设置，Qt 不会自动应用。
+:func:`ui.theme.font` 读一次系统的 TextScaleFactor 自己乘上去，只此一处。
 """
 
 from __future__ import annotations
@@ -30,139 +28,126 @@ class FontSpec(NamedTuple):
 
 REGULAR, MEDIUM, SEMIBOLD = 400, 500, 600
 
-# ----------------------------- 排版 -----------------------------------------
-#: 九个语义角色，Desktop 映射。先选角色，再由这里给字号，不用字号大小替代层级设计。
-PAGE_TITLE = FontSpec(22, 28, SEMIBOLD)
-TITLE = FontSpec(17, 22, SEMIBOLD)
-#: ⚠️ 必须大于 ``BODY`` 且用 Semibold + ``text.primary``。
-#: 规范点名禁止把组标题做成 caption、secondary 或弱灰文字——v2.0 正是 11px 弱灰。
-SECTION_TITLE = FontSpec(14, 18, SEMIBOLD)
-BODY = FontSpec(13, 18, REGULAR)
-SECONDARY = FontSpec(12, 16, REGULAR)
-CAPTION = FontSpec(11, 15, REGULAR)
-METRIC = FontSpec(28, 34, SEMIBOLD)
-BUTTON = FontSpec(13, 18, MEDIUM)
-MONO = FontSpec(12, 18, REGULAR)
+# ----------------------------- 字阶（16.1）----------------------------------
+PAGE_TITLE = FontSpec(24, 34, SEMIBOLD)       # DisplayXS，固定不折叠
+DIALOG_TITLE = FontSpec(18, 24, SEMIBOLD)
+EMPTY_TITLE = FontSpec(16, 22, MEDIUM)
+TITLE = FontSpec(14, 20, MEDIUM)              # 设置项、列表项标题
+BODY = FontSpec(14, 20, REGULAR)              # BodyM
+BUTTON = FontSpec(14, 20, MEDIUM)
+SECONDARY = FontSpec(12, 16, REGULAR)         # 摘要、元信息、页脚
+GROUP_TITLE = FontSpec(12, 16, MEDIUM)        # 分组标题，次要色
+CAPTION = FontSpec(10, 14, REGULAR)
+METRIC = FontSpec(36, 50, SEMIBOLD)           # DisplayM，大数字
+MONO = FontSpec(12, 18, REGULAR)              # 日志，项目自定（见 tokens.OVERRIDES）
 
-#: 全部角色，给「Token 都解析为单值」那条测试用。
 FONT_ROLES: dict[str, FontSpec] = {
-    "pageTitle": PAGE_TITLE, "title": TITLE, "sectionTitle": SECTION_TITLE,
-    "body": BODY, "secondary": SECONDARY, "caption": CAPTION,
-    "metric": METRIC, "button": BUTTON, "mono": MONO,
+    "pageTitle": PAGE_TITLE, "dialogTitle": DIALOG_TITLE, "emptyTitle": EMPTY_TITLE,
+    "title": TITLE, "body": BODY, "button": BUTTON, "secondary": SECONDARY,
+    "groupTitle": GROUP_TITLE, "caption": CAPTION, "metric": METRIC, "mono": MONO,
 }
 
-#: 只有这两个角色达到 WCAG 的「大号文本」，可以按 3:1 验收。
-#: 判定条件是字号 ≥24 任意字重，或 ≥18.66 且字重达到 Bold(700)；Semibold 不放宽。
-#: Mobile 的 ``pageTitle`` 也满足，但本项目是纯桌面程序，用不到。
-LARGE_TEXT_ROLES = ("metric",)
-
 # ----------------------------- 间距 -----------------------------------------
-SPACE_1, SPACE_2, SPACE_3, SPACE_4 = 4, 8, 12, 16
-SPACE_5, SPACE_6, SPACE_8, SPACE_10 = 20, 24, 32, 40
-
-#: 语义间距（Desktop）。组件用这些，不在页面里临时发明相邻数值。
-GAP_INLINE = 8          # 图标与标签、同一行紧密元素
-GAP_RELATED = 4         # 标题与说明、值与单位
+GAP_RELATED = 4         # 标题与摘要、值与单位
+GAP_INLINE = 8          # 图标与文字、分组标题与卡片
 GAP_CONTROL = 8         # 同组相邻控件
-GAP_GROUP = 16          # 同一 Section 内的小组
-GAP_SECTION = 24        # 两个 Section
+GAP_CARD = 12           # 卡片之间
+GAP_GROUP = 16          # 行内标题与控件
+GAP_SECTION = 32        # 分组之间（含分组标题）
 
-PADDING_CONTROL_X = 12
-PADDING_CONTROL_Y = 8
-PADDING_CONTAINER = 16
-PADDING_PAGE_X = 24
-PADDING_PAGE_Y = 24
+PAD_CONTROL_X = 16      # 按钮、输入框、设置行左右
+PAD_CONTROL_Y = 10      # 设置行上下
+PAD_CONTAINER = 16      # 卡片内边距
 
-# ----------------------------- Settings 版式 --------------------------------
-#: 规范的 Settings 默认结构（Desktop 列）。
-PAGE_TITLE_TO_SECTION = 24      # 页面标题 → 首个组标题
-SECTION_TITLE_TO_CARD = 8       # 组标题 → Card
-CARD_TO_NOTE = 8                # Card → 组级说明
+#: 页边距跟着窗口类走（16.2）：≥840 为 40，600～840 为 24，更窄 16
+PAGE_MARGIN_EXPANDED = 40
+PAGE_MARGIN_MEDIUM = 24
+PAGE_MARGIN_COMPACT = 16
+PAGE_TOP = 20           # 页面标题上方
+PAGE_BOTTOM = 32        # 列表末尾留白
 
-#: 单行设置项的最小行高；含一行说明时用后者。
-#: ⚠️ 地板要加在行**内部的标签**上，不能用 ``setMinimumHeight`` 给行本身定高——
-#: Qt 的 ``qSmartMinSize`` 里显式设过的最小高度会顶掉布局算出来的那个，
-#: 空间一紧这一行就被压到比内容还矮，标签和副标题叠在一起。
-ROW_MIN_HEIGHT = 32
-ROW_WITH_SUBLABEL_MIN_HEIGHT = 48
+# ----------------------------- 圆角（16.1）----------------------------------
+RADIUS_SMALL = 8        # 卡内小卡、菜单项
+RADIUS_MENU = 12        # 菜单、侧栏选中底
+RADIUS_CARD = 16        # 卡片
+RADIUS_DIALOG = 24      # 对话框、居中面板
+# 控件是胶囊：半径 = 高 / 2，由控件自己算
 
-# ----------------------------- 圆角 -----------------------------------------
-RADIUS_SMALL = 6        # 小控件、输入框
-RADIUS_MEDIUM = 10      # 普通容器、面板
-RADIUS_LARGE = 14       # Card、Sheet、大型浮层
-# radius.full 是 height / 2，由控件自己算（Switch 的胶囊轨道）
+# ----------------------------- 尺寸（16.1 / 16.2）---------------------------
+BREAK_MEDIUM = 600
+BREAK_EXPANDED = 840
+NAV_EXPANDED = 224      # COUISidePaneLayout
+NAV_RAIL = 72           # COUINavigationRailView
+NAV_ITEM = 40
+CONTENT_MAX_WIDTH = 720
 
-# ----------------------------- Focus ----------------------------------------
-#: 2px 焦点环，向外偏移 2px，中间露出控件所在的 Surface。
+BUTTON_HEIGHT = 32
+BUTTON_SMALL = 28
+BUTTON_MIN_WIDTH = 72
+ICON_BUTTON = 32        # 纯图标按钮的命中区
+ICON_ACTION = 20
+ICON_INLINE = 16
+INPUT_HEIGHT = 32
+SETTING_ROW = 40
+SETTING_ROW_WITH_DESC = 58
+MENU_ITEM = 32
+MENU_MIN_WIDTH = 160
+SWITCH_WIDTH = 44       # KIT switch.width
+SWITCH_HEIGHT = 24      # KIT switch.height
+SWITCH_THUMB = 18       # KIT switch.thumbSize
+DIALOG_WIDTH = 360      # KIT dialog.maxWidth
+PANEL_MAX_WIDTH = 540   # 手机的底部面板在电脑上居中浮起（16.5）
+DIALOG_PADDING = 24
+TOAST_BOTTOM = 24
+
 FOCUS_RING_WIDTH = 2
 FOCUS_RING_OFFSET = 2
-#: 彩色或深色 Surface 上要用双色环：外圈 accent.focus，内圈 1px 当前页面的
-#: canvas / surfaceElevated，由内圈保证与控件本体分离。
-FOCUS_RING_INNER_WIDTH = 1
+
+WINDOW_WIDTH = 1120
+WINDOW_HEIGHT = 760
+#: 16.9 的验收尺寸下限。再窄就要做临时抽屉，这个程序用不上，窗口不让缩到那么窄。
+WINDOW_MIN_WIDTH = 640
+WINDOW_MIN_HEIGHT = 480
 
 # ----------------------------- 动效 -----------------------------------------
-MOTION_IMMEDIATE = 120  # Hover、Pressed、颜色反馈
-MOTION_SMALL = 180      # Toggle、Indicator、局部展开
-MOTION_MEDIUM = 260     # Sheet、Popover、页面内层级切换
-MOTION_LARGE = 360      # 重要空间转换
+#: COUI 弹簧 (bounce, response)。换算 ζ = 1 − bounce、k = (2π / response)²（设计库 spec 07）。
+SPRINGS: dict[str, tuple[float, float]] = {
+    "state": (0.0, 0.3),        # KIT button.pressMask：悬停、按压蒙层
+    "press": (0.0, 0.3),        # KIT touchMotion.candyPress：按下缩小
+    "release": (0.5, 0.5),      # KIT touchMotion.candyRelease：松手弹回
+    "switch": (0.3, 0.4),       # KIT switch.toggle
+    "menu": (0.2, 0.4),         # KIT popupMenu.enterScale：菜单、下拉弹出，侧栏选中底滑动
+    "toastIn": (0.0, 0.3),      # KIT snackBar.enter
+    "toastOut": (0.0, 0.25),    # KIT snackBar.exit
+    "page": (0.0, 0.3),         # 换页淡入，自定
+}
+#: 设计库里对应的路径，测试逐项比对
+SPRING_KIT: dict[str, str] = {
+    "state": "button.pressMask", "press": "touchMotion.candyPress",
+    "release": "touchMotion.candyRelease", "switch": "switch.toggle",
+    "menu": "popupMenu.enterScale", "toastIn": "snackBar.enter", "toastOut": "snackBar.exit",
+}
 
-#: 进入与状态变化的缓动控制点；离场用 EASE_EXIT。
-EASE_STANDARD = ((0.2, 0.0), (0.0, 1.0))
-EASE_EXIT = ((0.4, 0.0), (1.0, 1.0))
+DIALOG_IN_MS = 250              # KIT dialog.enterDuration
+DIALOG_OUT_MS = 150             # KIT dialog.exitDurationCenter
+DIALOG_IN_BEZIER = (0.3, 0.0, 0.1, 1.0)
+DIALOG_OUT_BEZIER = (0.3, 0.0, 1.0, 1.0)
+DIALOG_SCALE_FROM = 0.8         # KIT dialog.enterScale
+TOAST_MS = 2500                 # KIT snackBar.duration
+PRESS_SCALE = 0.96              # 桌面按钮按下缩小的幅度，自定
+MENU_OFFSET = 6                 # 下拉弹出时从控件一侧滑出的距离，自定
+TOOLTIP_DELAY_MS = 500
 
-#: 系统开「减少动态效果」时：位移与缩放时长设 0，颜色与透明度统一 100ms。
-MOTION_REDUCED_MOVE = 0
-MOTION_REDUCED_FADE = 100
 
 # ----------------------------- 阴影 -----------------------------------------
 class Shadow(NamedTuple):
-    """结构化阴影定义，长度单位是逻辑像素。
+    """浮层阴影。COUI 的焦散阴影桌面上画不出来，这两档是自定的。"""
 
-    Qt 用 ``QGraphicsDropShadowEffect``：``blurRadius = blur``、
-    ``offset = (x, y)``；Qt 没有 spread 概念，保持 0。
-    """
-
-    x: int
     y: int
     blur: int
-    spread: int
     light: str
     dark: str
 
 
-ELEVATION_1 = Shadow(0, 1, 3, 0, "rgba(0, 0, 0, 0.10)", "rgba(0, 0, 0, 0.28)")
-ELEVATION_2 = Shadow(0, 4, 16, 0, "rgba(0, 0, 0, 0.14)", "rgba(0, 0, 0, 0.32)")
-
-# ----------------------------- 材质 -----------------------------------------
-#: Mica 铺上之后各层的不透明度。材质是 DWM 铺在窗口**后面**的，窗口那层像素
-#: 不透明就等于把它整个盖住，所以窗口和侧栏自己不画底色，其余各层压半透明。
-#: 材质没铺上时这套整个不用，回退到不透明的语义实色。
-MATERIAL_SURFACE_ALPHA = 0.62
-MATERIAL_ELEVATED_ALPHA = 0.86
-MATERIAL_FILL_ALPHA = 0.55
-MATERIAL_SUNKEN_ALPHA = 0.50
-
-# ----------------------------- 层叠顺序 -------------------------------------
-#: 浮层不靠临时数值互相压。Qt 里主要用于 ``raise_()`` 的先后和自绘覆盖层。
-LAYER_CONTENT = 0
-LAYER_NAV = 100
-LAYER_POPOVER = 200
-LAYER_SHEET = 300
-LAYER_DIALOG = 400
-LAYER_TOAST = 500
-LAYER_TOOLTIP = 600
-
-# ----------------------------- 图标 -----------------------------------------
-ICON_INLINE = 16        # 行内
-ICON_ACTION = 20        # 独立操作
-
-# ----------------------------- 其他 -----------------------------------------
-#: 内容列宽上限。窗口能拉到 2000 宽，而「标签在最左、控件在最右」的行一旦拉开，
-#: 中间就是一大片空白，眼睛要横扫整行才对得上。多出来的宽度留白。
-COLUMN_WIDTH = 840
-
-#: Tooltip 最大宽度。再宽说明它不该是 Tooltip。
-TOOLTIP_MAX_WIDTH = 280
-#: 指针悬停后延迟显示 / 移开后消失。
-TOOLTIP_DELAY_MS = 500
-TOOLTIP_HIDE_MS = 100
+SHADOW_FLOAT = Shadow(4, 16, "#1F000000", "#80000000")     # Toast、菜单
+SHADOW_DIALOG = Shadow(12, 40, "#2E000000", "#99000000")   # 对话框、面板
