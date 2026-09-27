@@ -465,7 +465,7 @@ class MainWindow(QMainWindow):
         实测的时序：结算画面显示期间计数块**仍然活着**、冻结在最终值，
         要等玩家离开结算画面内存才释放——所以结算信号本身来得太晚，
         截不到。冻结两秒半就开始尝试，误触发（曲中长空档）由 CaptureService
-        里的指纹检查挡掉，结算信号那次请求留作兜底。
+        里的画面检查挡掉，结算信号那次请求留作兜底。
         """
         now = time.monotonic()
         if counts != self._tick_last:

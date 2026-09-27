@@ -48,7 +48,7 @@ core/config.py     配置读写 / 迁移 / 路径推导      core/models.py  数
 core/watcher.py    目录监视 + 游戏感知
 core/judge_memory.py  内存签名扫描（只读）
 core/link_server.py   本机 SSE 数据服务（DGHub 插件连它）
-core/capture.py       结算画面自动截图 + 像素指纹
+core/capture.py       结算画面自动截图 + 画面识别
 core/start_bat.py  start.bat 注入      core/autostart.py  开机自启
 core/game_locator.py  自动找游戏目录    core/paths.py  数据目录定位
 core/winapi.py     ctypes 封装：进程 / 窗口 / 抓帧 / 单实例 / DPI
@@ -74,9 +74,13 @@ core/winapi.py     ctypes 封装：进程 / 窗口 / 抓帧 / 单实例 / DPI
    数字紧贴右边界时 tesseract 会把边缘噪点连上去（实测「MISS : 1」读成「14」，7 张真实
    截图上都是）。但同样的留白加在得分行上，psm 7 会整行读空，303 张真实截图上多出
    115 处得分错误。→ `core/ocr.py` 的 `TOP_LINE_PAD`
-5. **成绩画面识别要两道检查叠加**：17 点像素指纹 + 判定明细面板均色。
-   曲终先出现的 CLEAR 过场和成绩画面共享**全部**顶部 chrome，单靠指纹分不开，
-   生产环境就是这么截错的。→ `test_the_chrome_alone_is_not_enough_to_be_a_result_screen`
+5. **成绩画面识别要三道检查叠加，而且只看跨版本不变的元素**：顶栏黄字黑底 + 判定明细面板
+   紫色底条 + 中间没被庆祝动画盖住。曲终先出现的 CLEAR 过场和成绩画面共享**全部**顶部 chrome，
+   只靠顶栏分不开，生产环境就是这么截错的。背景、顶栏底色、头像、称号都会随版本或玩家变，
+   不许拿来当特征：v2.1 的 17 点指纹有 11 个点取在背景上，游戏升 2.50 换了黄色主题就一张都截不到。
+   阈值是在 305 张旧版本成绩图和 2.50 实机帧上量的，数字写在 `core/capture.py` 各常量旁边。
+   → `test_the_chrome_alone_is_not_enough_to_be_a_result_screen`、
+   `test_a_result_screen_is_recognised_whatever_the_version_theme`
 6. **内存读取只读。** `ReadProcessMemory` / `VirtualQueryEx`，不写、不注入、不 hook。
 7. **后台线程的回调一律通过 Qt 信号回界面线程。** 直接从工作线程碰部件是未定义行为。
 8. **字号一律按像素给**（`setPixelSize` / QSS 的 `px`）。`ui/theme/metrics.py` 的九个

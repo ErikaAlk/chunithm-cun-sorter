@@ -5,16 +5,21 @@
 抓一帧游戏画面，确认是成绩画面就等分数滚完再存进截图目录。判定数据直接来自
 内存，所以这样存下来的新截图**完全不需要 OCR**。
 
-「是不是成绩画面」靠两道叠加的检查：
+「是不是成绩画面」靠三道叠加的检查，每一道都只看**跨版本不变**的界面元素：
 
-1. **17 点 UI 骨架像素指纹**——这些点在全部存量成绩图上恒定不变
-   （由 ``tools/gen_result_signature.py`` 从归档统计生成）。打歌画面只命中
-   9/17、地图画面 11/17，阈值定在 16/17。
-2. **判定明细面板区域均色**——曲终先出现的 CLEAR 过场和成绩画面共享**全部**
-   顶部 chrome，单靠指纹分不开（生产环境就是这么截错的）。但成绩画面中部
-   有一块深紫色的判定明细面板，CLEAR 那个位置是近白背景，两者差 ≥90。
+1. **顶栏**——「JUSTICE CRITICAL」那段黄字黑底。打歌、CLEAR 过场、成绩画面都有，
+   TOTAL RESULT、选曲、地图没有。
+2. **判定明细面板**——成绩画面中部那几行紫色底条。CLEAR 过场和成绩画面共享**全部**
+   顶部 chrome，只有这块面板能把两者分开（生产环境就是这么截错过的）。
+3. **没有被动画盖住**——刷新纪录、Rating 上涨时，成绩画面上会先铺一块深色横幅再闪一下。
+   面板已经出来了，但这时候截下来的图中间是一块黑。
 
-坐标按 1920×1080 标定，其它分辨率按比例缩放。
+⚠️ 别拿背景、顶栏底色、头像、称号、曲绘做特征：它们会随游戏版本或玩家设置变。
+2.1 及之前的 17 点指纹有 11 个点取在背景和顶栏底色上（另有 2 个在头像和称号上），
+游戏升到 2.50、主题换成黄色之后，成绩画面只剩 6~7/17，自动截图一张都截不到。
+
+阈值在 305 张旧版本成绩图和 2.50 版的实机帧上量过，数字写在各常量旁边。
+坐标按 1920×1080 标定，其它分辨率（比如 24 寸映射补丁的 3413×1920）按比例缩放。
 """
 
 from __future__ import annotations
@@ -30,27 +35,28 @@ from PIL import Image
 from . import paths, winapi
 from .models import CaptureConfig, CunConfig, JudgeCounts
 
-#: (x, y, r, g, b)：在所有成绩截图上都稳定的 UI 骨架采样点
-SIGNATURE: tuple[tuple[int, int, int, int, int], ...] = (
-    (80, 168, 8, 174, 247), (1800, 208, 3, 198, 242), (1328, 40, 9, 216, 245),
-    (64, 16, 239, 16, 16), (696, 24, 250, 210, 33), (1128, 40, 189, 52, 254),
-    (760, 24, 231, 193, 35), (1752, 288, 223, 233, 253), (88, 648, 250, 235, 253),
-    (40, 688, 252, 254, 255), (1896, 944, 255, 252, 255), (64, 272, 254, 254, 252),
-    (24, 408, 255, 254, 255), (1848, 960, 255, 254, 254), (1752, 48, 255, 255, 255),
-    (376, 32, 214, 219, 222), (1552, 16, 201, 200, 200),
-)
-MATCH_TOL = 24              # 单通道容差
-MATCH_NEED = 16             # 17 个点里至少命中这么多（成绩画面 17/17，打歌 9/17）
+REF_W, REF_H = 1920, 1080
 POLL_SEC = 0.5
 
-#: 判定明细面板的取样矩形与它的期望均色。
-#: 实测 231/235 张归档成绩图落在 (106,46,177) ±20 以内（离群的是「表示切替」另一种视图）；
-#: CLEAR / 打歌 / 地图画面至少有一个通道差出 90 以上。
-JUDGE_PANEL_RECT = (640, 665, 900, 845)
-JUDGE_PANEL_RGB = (106, 46, 177)
-JUDGE_PANEL_TOL = 45
+#: 顶栏「JUSTICE CRITICAL」标签那一段。黄字占比实测 0.225~0.239、黑底 0.618~0.624，
+#: 两个版本、打歌 / CLEAR / 成绩三种画面都在这个范围；TOTAL RESULT 黑底是 0。
+CHROME_RECT = (600, 10, 760, 28)
+CHROME_YELLOW_MIN = 0.15
+CHROME_DARK_MIN = 0.45
 
-REF_W, REF_H = 1920, 1080
+#: 判定明细面板里标签和数字之间那一列，四行紫色底条都从这里经过，没有字。
+#: 紫色占比：成绩画面 0.955~0.961（新版多出的 LATE / FAST 行在这一列下面），
+#: 打歌、CLEAR、TOTAL RESULT ≤0.02，动画闪白那一下 0.49~0.64。
+JUDGE_COLUMN_RECT = (770, 655, 815, 810)
+JUDGE_PURPLE_MIN = 0.85
+
+#: 画面正中那条带，干净的成绩画面上全是浅色面板（305 张里深色占比都是 0）；
+#: 庆祝动画的深色横幅盖上来时是 0.44~0.77。
+OVERLAY_BAND_RECT = (640, 460, 1300, 620)
+OVERLAY_DARK_MAX = 0.05
+
+#: 诊断用的进度：一帧最多走到哪一道检查
+STAGE_NONE, STAGE_CHROME, STAGE_PANEL, STAGE_CLEAN = 0, 1, 2, 3
 
 CapturedFn = Callable[[str, JudgeCounts], None]
 StatusFn = Callable[[str], None]
@@ -97,44 +103,66 @@ def grab(process_name: str) -> Frame | None:
     return Frame(buf, w, h)
 
 
-def signature_score(frame: Frame) -> int:
-    """17 个采样点里命中了几个。"""
+def _fraction(frame: Frame, rect: tuple[int, int, int, int],
+              test: Callable[[int, int, int], bool], step: int) -> float:
+    """矩形（1920×1080 坐标）里满足 ``test`` 的像素占比，隔 ``step`` 取一个点。"""
     sx, sy = frame.width / REF_W, frame.height / REF_H
-    hit = 0
-    for x, y, r, g, b in SIGNATURE:
-        px = min(int(x * sx), frame.width - 1)
+    x1, y1, x2, y2 = rect
+    hit = n = 0
+    for y in range(y1, y2, step):
         py = min(int(y * sy), frame.height - 1)
-        pr, pg, pb = frame.pixel(px, py)
-        if abs(pr - r) <= MATCH_TOL and abs(pg - g) <= MATCH_TOL and abs(pb - b) <= MATCH_TOL:
-            hit += 1
-    return hit
+        for x in range(x1, x2, step):
+            hit += test(*frame.pixel(min(int(x * sx), frame.width - 1), py))
+            n += 1
+    return hit / n if n else 0.0
+
+
+def _yellow(r: int, g: int, b: int) -> bool:
+    return r >= 170 and g >= 140 and b <= 90
+
+
+def _black(r: int, g: int, b: int) -> bool:
+    return max(r, g, b) <= 40
+
+
+def _purple(r: int, g: int, b: int) -> bool:
+    return b - g >= 70 and b >= r + 20
+
+
+def _dark_grey(r: int, g: int, b: int) -> bool:
+    """庆祝动画那块横幅：暗、而且不怎么饱和。面板上的紫色、彩色大字都不算。"""
+    return (299 * r + 587 * g + 114 * b) < 80_000 and max(r, g, b) - min(r, g, b) < 70
+
+
+def chrome_present(frame: Frame) -> bool:
+    """顶栏在不在：打歌、CLEAR 过场、成绩画面都有它。"""
+    return (_fraction(frame, CHROME_RECT, _yellow, 2) >= CHROME_YELLOW_MIN
+            and _fraction(frame, CHROME_RECT, _black, 2) >= CHROME_DARK_MIN)
 
 
 def judge_panel_looks_right(frame: Frame) -> bool:
-    """判定明细面板那块的均色对不对得上（用来把 CLEAR 过场挡在外面）。"""
-    sx, sy = frame.width / REF_W, frame.height / REF_H
-    x1 = int(JUDGE_PANEL_RECT[0] * sx)
-    y1 = int(JUDGE_PANEL_RECT[1] * sy)
-    x2 = min(int(JUDGE_PANEL_RECT[2] * sx), frame.width)
-    y2 = min(int(JUDGE_PANEL_RECT[3] * sy), frame.height)
-    total_r = total_g = total_b = 0
-    n = 0
-    for y in range(y1, y2, 4):
-        for x in range(x1, x2, 4):
-            r, g, b = frame.pixel(x, y)
-            total_r += r
-            total_g += g
-            total_b += b
-            n += 1
-    if n == 0:
-        return False
-    return (abs(total_r // n - JUDGE_PANEL_RGB[0]) <= JUDGE_PANEL_TOL
-            and abs(total_g // n - JUDGE_PANEL_RGB[1]) <= JUDGE_PANEL_TOL
-            and abs(total_b // n - JUDGE_PANEL_RGB[2]) <= JUDGE_PANEL_TOL)
+    """判定明细面板出来了没有（用来把 CLEAR 过场挡在外面）。"""
+    return _fraction(frame, JUDGE_COLUMN_RECT, _purple, 3) >= JUDGE_PURPLE_MIN
+
+
+def overlay_covers_panels(frame: Frame) -> bool:
+    """成绩画面正被庆祝动画的深色横幅盖着。"""
+    return _fraction(frame, OVERLAY_BAND_RECT, _dark_grey, 4) > OVERLAY_DARK_MAX
+
+
+def stage(frame: Frame) -> int:
+    """这一帧走到了第几道检查，``STAGE_CLEAN`` 就是可以存的成绩画面。"""
+    if not chrome_present(frame):
+        return STAGE_NONE
+    if not judge_panel_looks_right(frame):
+        return STAGE_CHROME
+    if overlay_covers_panels(frame):
+        return STAGE_PANEL
+    return STAGE_CLEAN
 
 
 def is_result_screen(frame: Frame) -> bool:
-    return signature_score(frame) >= MATCH_NEED and judge_panel_looks_right(frame)
+    return stage(frame) == STAGE_CLEAN
 
 
 def save_png(frame: Frame, directory: str) -> str:
@@ -204,19 +232,15 @@ class CaptureService:
         deadline = start + max(5.0, cap.timeout_s)
         best = -1
         best_frame: Frame | None = None
-        chrome_but_no_panel = False                 # 指纹命中了但面板没对上
 
         while time.monotonic() < deadline and not self._stop.is_set():
             frame = grab(cfg.game_process)
             if frame is not None:
-                score = signature_score(frame)
-                panel = judge_panel_looks_right(frame)
-                if score >= MATCH_NEED and not panel:
-                    chrome_but_no_panel = True
-                if score > best:
-                    best = score
+                reached = stage(frame)
+                if reached > best:
+                    best = reached
                     best_frame = frame
-                if score >= MATCH_NEED and panel:
+                if reached == STAGE_CLEAN:
                     # chrome 出来了，但分数可能还在滚——等动画走完，复验一次，
                     # 留下**那一帧**而不是现在这帧。
                     self._stop.wait(min(max(cap.delay_s, 0.0), 15.0))
@@ -239,13 +263,13 @@ class CaptureService:
             self._status("未捕获：拿不到游戏画面（窗口不在？）")
             return
 
-        # 把最接近的一帧存下来，方便离线看是哪几个指纹点没过、差了多少
+        # 把走得最远的那一帧存下来，方便离线看卡在哪一道检查
         note = ""
         if best_frame is not None:
             try:
                 d = paths.diag_dir()
                 d.mkdir(parents=True, exist_ok=True)
-                dump = d / f"capture_{datetime.now():%Y%m%d_%H%M%S}_best{best}.png"
+                dump = d / f"capture_{datetime.now():%Y%m%d_%H%M%S}_stage{best}.png"
                 img = best_frame.to_image()
                 try:
                     img.save(dump)
@@ -254,5 +278,13 @@ class CaptureService:
                 note = f"，最佳帧已存 diag\\{dump.name}"
             except OSError:
                 pass                                # 诊断而已，存不下就算了
-        hint = "；指纹命中但判定面板未匹配（停在 CLEAR 过场/切换视图？）" if chrome_but_no_panel else ""
-        self._status(f"未捕获到结算画面（超时；最高指纹得分 {best}/{len(SIGNATURE)}{hint}{note}）")
+        self._status(f"未捕获到结算画面：{_STAGE_HINTS[best]}{note}")
+
+
+#: 超时的时候最远走到哪一步，对应的原因
+_STAGE_HINTS = {
+    STAGE_NONE: "一直没看到游戏顶栏（不在打歌或结算画面）",
+    STAGE_CHROME: "没等到判定明细面板（停在 CLEAR 过场，或结算画面被跳过、切换了视图）",
+    STAGE_PANEL: "判定明细面板一直被动画挡着",
+    STAGE_CLEAN: "",
+}

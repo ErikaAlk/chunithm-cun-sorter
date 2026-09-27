@@ -87,59 +87,91 @@ def test_an_ocr_record_without_a_size_omits_the_key():
 
 
 # ----------------------------- 结算画面识别 ---------------------------------
+#: 两个版本的背景主题色：2.50 之前是浅蓝，2.50 换成了黄色
+_OLD_THEME = (226, 238, 252)
+_NEW_THEME = (255, 250, 225)
+
+
 def _frame(width: int = 1920, height: int = 1080,
            fill: tuple[int, int, int] = (0, 0, 0)) -> capture.Frame:
     r, g, b = fill
     return capture.Frame(bytes([b, g, r, 255]) * (width * height), width, height)
 
 
-def _paint(frame: capture.Frame, x: int, y: int, rgb: tuple[int, int, int]) -> capture.Frame:
+def _paint(frame: capture.Frame, rect: tuple[int, int, int, int],
+           rgb: tuple[int, int, int], every: int = 1) -> capture.Frame:
+    """在 1920×1080 坐标的矩形里涂色（按帧的实际分辨率缩放）；``every`` 隔列涂，用来做条纹。"""
+    sx, sy = frame.width / 1920, frame.height / 1080
+    x1, y1, x2, y2 = (int(rect[0] * sx), int(rect[1] * sy),
+                      int(rect[2] * sx), int(rect[3] * sy))
     buf = bytearray(frame.buf)
-    i = (y * frame.width + x) * 4
-    buf[i:i + 3] = bytes([rgb[2], rgb[1], rgb[0]])
+    px = bytes([rgb[2], rgb[1], rgb[0], 255])
+    for y in range(y1, y2):
+        row = y * frame.width
+        for x in range(x1, x2, every):
+            i = (row + x) * 4
+            buf[i:i + 4] = px
     return capture.Frame(bytes(buf), frame.width, frame.height)
+
+
+def _in_song(background: tuple[int, int, int], width: int = 1920,
+             height: int = 1080) -> capture.Frame:
+    """打歌、CLEAR 过场、成绩画面共有的样子：背景 + 顶栏那段黄字黑底。"""
+    frame = _frame(width, height, background)
+    frame = _paint(frame, capture.CHROME_RECT, (0, 0, 0))
+    return _paint(frame, capture.CHROME_RECT, (239, 203, 33), every=3)
+
+
+def _result(background: tuple[int, int, int], width: int = 1920,
+            height: int = 1080) -> capture.Frame:
+    frame = _in_song(background, width, height)
+    frame = _paint(frame, capture.OVERLAY_BAND_RECT, (250, 250, 252))    # 浅色面板
+    return _paint(frame, (640, 655, 910, 845), (106, 46, 177))            # 判定明细面板
 
 
 def test_a_black_frame_matches_nothing():
     frame = _frame()
-    assert capture.signature_score(frame) == 0
-    assert not capture.judge_panel_looks_right(frame)
+    assert capture.stage(frame) == capture.STAGE_NONE
     assert not capture.is_result_screen(frame)
-
-
-def test_a_frame_with_every_signature_point_scores_full():
-    frame = _frame()
-    for x, y, r, g, b in capture.SIGNATURE:
-        frame = _paint(frame, x, y, (r, g, b))
-    assert capture.signature_score(frame) == len(capture.SIGNATURE)
 
 
 def test_the_chrome_alone_is_not_enough_to_be_a_result_screen():
     """CLEAR 过场和成绩画面共享全部顶部 chrome，只有判定面板能分开它们。
 
-    这一条对着的是实机上真发生过的误截：指纹 17/17 但截到的是 CLEAR。
+    这一条对着的是实机上真发生过的误截：指纹全中，截到的却是 CLEAR。
     """
-    frame = _frame()
-    for x, y, r, g, b in capture.SIGNATURE:
-        frame = _paint(frame, x, y, (r, g, b))
-    assert capture.signature_score(frame) >= capture.MATCH_NEED
-    assert not capture.is_result_screen(frame)     # 判定面板那块还是黑的
+    frame = _in_song(_OLD_THEME)
+    assert capture.chrome_present(frame)
+    assert capture.stage(frame) == capture.STAGE_CHROME
+    assert not capture.is_result_screen(frame)
 
 
-def test_the_judge_panel_is_matched_by_its_mean_colour():
-    x1, y1, x2, y2 = capture.JUDGE_PANEL_RECT
-    buf = bytearray(bytes([0, 0, 0, 255]) * (1920 * 1080))
-    r, g, b = capture.JUDGE_PANEL_RGB
-    for y in range(y1, y2):
-        for x in range(x1, x2):
-            i = (y * 1920 + x) * 4
-            buf[i:i + 3] = bytes([b, g, r])
-    assert capture.judge_panel_looks_right(capture.Frame(bytes(buf), 1920, 1080))
+def test_a_result_screen_is_recognised_whatever_the_version_theme():
+    """游戏 2.50 把背景从浅蓝换成了黄色，旧指纹从 17/17 掉到 6/17，一张都截不到。
+
+    识别只能看跨版本不变的元素，背景换什么颜色都不该影响结果。
+    """
+    for background in (_OLD_THEME, _NEW_THEME, (40, 40, 60)):
+        assert capture.is_result_screen(_result(background)), background
 
 
-def test_signature_points_scale_with_the_resolution():
-    """4K 截图也要能对上，坐标按比例换算。"""
-    frame = _frame(3840, 2160)
-    for x, y, r, g, b in capture.SIGNATURE:
-        frame = _paint(frame, x * 2, y * 2, (r, g, b))
-    assert capture.signature_score(frame) == len(capture.SIGNATURE)
+def test_a_result_screen_under_the_celebration_banner_is_not_saved_yet():
+    """刷新纪录时那块深色横幅会盖住画面中间，那一帧存下来是坏图，要等它过去。"""
+    frame = _paint(_result(_NEW_THEME), (570, 444, 1350, 636), (35, 45, 65))
+    assert capture.judge_panel_looks_right(frame)
+    assert capture.overlay_covers_panels(frame)
+    assert capture.stage(frame) == capture.STAGE_PANEL
+    assert not capture.is_result_screen(frame)
+
+
+def test_a_purple_play_field_without_the_top_bar_is_not_a_result():
+    """判定面板那块碰巧是紫色的别的画面（选曲、地图）没有顶栏，也不能当成绩画面。"""
+    frame = _paint(_frame(fill=_NEW_THEME), (640, 655, 910, 845), (106, 46, 177))
+    assert capture.judge_panel_looks_right(frame)
+    assert not capture.is_result_screen(frame)
+
+
+def test_detection_scales_with_the_resolution():
+    """24 寸映射补丁把游戏窗口拉到 3413×1920，坐标要按比例换算。"""
+    assert capture.is_result_screen(_result(_NEW_THEME, 3413, 1920))
+    assert not capture.is_result_screen(_in_song(_NEW_THEME, 3413, 1920))
