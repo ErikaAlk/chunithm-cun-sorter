@@ -42,8 +42,8 @@ class FirstRunPanel(Panel):
         if detected is not None:
             self._set_root(detected, "已自动找到，不对就重新选择")
         else:
-            self._hint.setText("没有自动找到。选中 CHUNITHM 根目录（里面有 bin 文件夹），"
-                               "跳过的话之后也能在“配置”页里补")
+            self._set_hint("没有自动找到。选中 CHUNITHM 根目录（里面有 bin 文件夹），"
+                           "跳过的话之后也能在“配置”页里补")
 
     def _browse(self) -> None:
         start = str(self.game_root) if self.game_root else ""
@@ -52,8 +52,8 @@ class FirstRunPanel(Panel):
             return
         root = normalize_game_root(chosen)
         if root is None:
-            self._hint.setText("这个目录里没有 bin 文件夹，不像 CHUNITHM 的安装位置。"
-                               "选根目录或者它的 bin 目录")
+            self._set_hint("这个目录里没有 bin 文件夹，不像 CHUNITHM 的安装位置。"
+                           "选根目录或者它的 bin 目录")
             return
         self._set_root(root, "")
 
@@ -62,9 +62,13 @@ class FirstRunPanel(Panel):
         self._path_row.set_desc(str(root))
         shots, _bat = derive_paths(root)
         self._derived_row.set_desc(shots if Path(shots).is_dir() else f"{shots}（将自动创建）")
-        self._hint.setText(hint)
-        self._hint.setVisible(bool(hint))
+        self._set_hint(hint)
         self.confirm_button.setEnabled(True)
+
+    def _set_hint(self, text: str) -> None:
+        """文字和可见性一起改：选过一次有效目录之后提示被藏起来，再选错时得重新露出来。"""
+        self._hint.setText(text)
+        self._hint.setVisible(bool(text))
 
 
 def ask_for_game_root(cfg: CunConfig, parent: QWidget) -> Path | None:

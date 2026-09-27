@@ -24,6 +24,17 @@ _LEGACY_KINDS = {"aj": "AJ", "fc": "FC"}
 _CUSTOM_RANGE = "自定义区间"
 
 
+def unique_key(label_text: str, taken: set[str]) -> str:
+    """规则的 key 是它的持久身份（分类结果、DGHub 的 rules 字段都认它），不能重。"""
+    base = label_text.strip() or "custom"
+    key = base
+    i = 2
+    while key in taken:
+        key = f"{base}_{i}"
+        i += 1
+    return key
+
+
 def summary(cat: Category, cfg: CunConfig) -> str:
     """设置行第二行放的数据：这条规则到底卡在哪。"""
     if cat.kind == "score":
@@ -204,21 +215,12 @@ class RulePanel(Panel):
         self.reject()
 
     # ----------------------------- 结果 -------------------------------------
-    def _unique_key(self, label_text: str) -> str:
-        base = label_text.strip() or "custom"
-        key = base
-        i = 2
-        while key in self._taken:
-            key = f"{base}_{i}"
-            i += 1
-        return key
-
     def result_category(self) -> Category:
         name = self.name_box.text().strip()
         kind = self._kind()
         folder = self.folder_box.text().strip() or f"寸/{name}"
         old = self._existing
-        cat = Category(key=old.key if old else self._unique_key(name), label=name, kind=kind,
+        cat = Category(key=old.key if old else unique_key(name, self._taken), label=name, kind=kind,
                        enabled=old.enabled if old else True, custom=True, folder=folder)
         if kind == "score":
             cat.lo = self.lo_box.value()

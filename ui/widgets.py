@@ -272,11 +272,11 @@ class FocusTracker(QObject):
         self.sync()
 
     def sync(self) -> None:
-        for ring in list(self._rings.values()):
+        for key, ring in list(self._rings.items()):
             try:
                 ring.hide()
-            except RuntimeError:                    # 窗口已经销毁
-                pass
+            except RuntimeError:                    # 面板关掉之后，环跟着它一起销毁了
+                del self._rings[key]
         w = self.target
         try:
             if (w is None or not w.isVisible() or w.property("ownFocusRing")
@@ -288,7 +288,11 @@ class FocusTracker(QObject):
             self._timer.stop()
             return
         ring = self._rings.get(id(win))
-        if ring is None or ring.parent() is not win:
+        try:
+            stale = ring is None or ring.parent() is not win
+        except RuntimeError:                        # 同一个 id 被新窗口复用，旧环已销毁
+            stale = True
+        if stale:
             ring = self._rings[id(win)] = _Ring(win)
         pad = m.FOCUS_RING_WIDTH + m.FOCUS_RING_OFFSET
         top_left = w.mapTo(win, QPoint(0, 0))
@@ -1152,7 +1156,7 @@ class Toast(QFrame):
     def _run_action(self) -> None:
         callback, self._on_action = self._on_action, None
         self.dismiss()
-        if callback is not None and callback is not self.dismiss:
+        if callback is not None and callback != self.dismiss:
             callback()
 
     def dismiss(self) -> None:
@@ -1214,13 +1218,44 @@ class Panel(QDialog):
         bar.addWidget(self.confirm_button)
         lay.addLayout(bar)
         lay.addSpacing(m.GAP_INLINE)
-        body_holder = QWidget()
-        self.body = QVBoxLayout(body_holder)
+        self._bar = bar
+        # 正文放进滚动区：窗口矮到放不下时可以滚，而不是把行挤扁
+        self._body_holder = QWidget()
+        self._body_holder.setObjectName("PageBody")
+        self.body = QVBoxLayout(self._body_holder)
         self.body.setContentsMargins(m.PAD_CONTAINER - m.GAP_INLINE, 0,
                                      m.PAD_CONTAINER - m.GAP_INLINE, 0)
         self.body.setSpacing(m.GAP_CARD)
-        lay.addWidget(body_holder)
+        self._scroll = QScrollArea()
+        self._scroll.setObjectName("PageScroll")
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setWidget(self._body_holder)
+        lay.addWidget(self._scroll)
+        # 正文里的行会随选择显示 / 隐藏（换规则类型），卡片高度要跟着重算
+        self._body_holder.installEventFilter(self)
         install_focus_tracker(QApplication.instance())
+
+    def eventFilter(self, obj, e) -> bool:          # noqa: N802
+        if obj is self._body_holder and e.type() == QEvent.Type.LayoutRequest:
+            self._fit_card()
+        return False
+
+    def _fit_card(self) -> None:
+        """卡片高度 = 顶栏 + 正文的自然高度，但不超过窗口；超出的部分在正文里滚动。
+
+        正文可能有折行的标签，高度得按宽度算；没有折行时 heightForWidth 返回 -1。
+        """
+        inner = self._width - 2 * m.GAP_INLINE
+        body = self.body
+        natural = (body.totalHeightForWidth(inner) if body.hasHeightForWidth()
+                   else body.totalSizeHint().height())
+        margins = self.card.layout().contentsMargins()
+        want = (margins.top() + self._bar.sizeHint().height() + m.GAP_INLINE + natural
+                + margins.bottom())
+        room = self.height() - 2 * m.PAGE_MARGIN_COMPACT
+        self.card.setFixedHeight(min(want, room) if room > 0 else want)
 
     # ---- 结果 ----
     def validate(self) -> bool:
@@ -1250,14 +1285,11 @@ class Panel(QDialog):
     def run(self) -> bool:
         """模态打开，关掉之后返回是不是点了「完成」。焦点会回到打开它之前的控件。"""
         before = QApplication.focusWidget()
-        # 卡片定宽、里面可能有折行的标签：高度按宽度算，没有折行时 totalHeightForWidth 返回 -1
-        lay = self.card.layout()
-        self.card.setFixedHeight(lay.totalHeightForWidth(self._width) if lay.hasHeightForWidth()
-                                 else lay.totalSizeHint().height())
         win = self.parentWidget()
         central = getattr(win, "centralWidget", lambda: None)() or win
         top_left = central.mapToGlobal(QPoint(0, 0))
         self.setGeometry(top_left.x(), top_left.y(), central.width(), central.height())
+        self._fit_card()
         if not theme.reduce_motion():
             # 先透明地显示一帧，拿到排好版的卡片截图，再从截图开始放大淡入
             self.setWindowOpacity(0.0)

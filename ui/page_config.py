@@ -16,7 +16,7 @@ from core.config import derive_paths, normalize_game_root
 from core.models import Category, CunConfig, OrganizeStep
 
 from . import theme
-from .rule_dialog import RulePanel, summary
+from .rule_dialog import RulePanel, summary, unique_key
 from .widgets import (Button, ComboBox, DoubleSpinBox, IconButton, Page, Section,
                       SettingRow, SpinBox, Switch)
 
@@ -180,6 +180,10 @@ class ConfigPage(Page):
         self._main.save_settings()
 
         def undo() -> None:
+            # 删掉之后又新建了同名规则的话，旧 key 已经被占了，撤销回来的换一个
+            taken = self._taken_keys()
+            if cat.key in taken:
+                cat.key = unique_key(cat.key, taken)
             self._cfg.categories.insert(min(index, len(self._cfg.categories)), cat)
             self._rebuild_rules()
             self._main.save_settings()

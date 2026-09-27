@@ -208,6 +208,11 @@ class MainWindow(QMainWindow):
         self._update_game_label()
 
         self._tray = self._build_tray(icon)
+        # 系统设置变化的消息一次会来好几条（WM_SETTINGCHANGE 常常成串），停下来再刷一次
+        self._settings_timer = QTimer(self)
+        self._settings_timer.setSingleShot(True)
+        self._settings_timer.setInterval(150)
+        self._settings_timer.timeout.connect(self.apply_appearance)
         QTimer.singleShot(0, self._after_shown)
 
     # ----------------------------- 组装 -------------------------------------
@@ -328,9 +333,9 @@ class MainWindow(QMainWindow):
             import ctypes
             from ctypes import wintypes
             msg = ctypes.cast(int(message), ctypes.POINTER(wintypes.MSG)).contents
-            if msg.message in (_WM_SETTINGCHANGE, _WM_THEMECHANGED):
-                # 系统设置变化的消息一次会来好几条，等它停下再刷一次
-                QTimer.singleShot(120, self.apply_appearance)
+            timer = getattr(self, "_settings_timer", None)   # 构造到一半时还没有
+            if timer is not None and msg.message in (_WM_SETTINGCHANGE, _WM_THEMECHANGED):
+                timer.start()
         return super().nativeEvent(event_type, message)
 
     def apply_appearance(self) -> None:

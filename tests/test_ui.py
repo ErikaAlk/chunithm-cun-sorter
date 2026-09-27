@@ -150,3 +150,56 @@ def test_hiding_a_row_takes_its_divider_with_it(app):
     dividers = [w for w in card.findChildren(Divider)]
     shown = [d for d in dividers if not d.isHidden()]
     assert len(shown) == 1, "只剩两行，中间只该有一条线"
+
+
+def test_undoing_a_delete_after_reusing_the_name_does_not_duplicate_the_key(app, cfg):
+    """删掉 AJ寸 → 新建同名规则（拿走了空出来的 key）→ 再点撤销：两条规则不能同一个 key。"""
+    from ui.page_config import ConfigPage
+    cfg.categories = [Category(key="AJ寸", label="AJ寸", kind="ajcun", enabled=True,
+                               folder="寸/AJ寸", custom=True, m_hi=4)]
+    main = _FakeMain(cfg)
+    page = ConfigPage(main)
+    page._remove_rule(0)
+    cfg.categories.append(Category(key="AJ寸", label="AJ寸", kind="ajcun", enabled=True,
+                                   folder="寸/AJ寸", custom=True, m_hi=2))
+    _text, (_label, undo) = main.toasts[-1]
+    undo()
+    keys = [c.key for c in _saved().categories]
+    assert len(keys) == len(set(keys)) == 2, keys
+
+
+def test_the_panel_grows_when_a_rule_type_needs_more_rows(app, cfg):
+    """编辑 AJ寸（一行条件）时换成 ATTACK+MISS（三行），卡片高度要跟着长，不能被锁在打开时的高度。"""
+    from ui.rule_dialog import RulePanel
+    host = QtWidgets.QMainWindow()
+    host.setCentralWidget(QtWidgets.QWidget())
+    host.resize(1000, 900)
+    rule = Category(key="AJ寸", label="AJ寸", kind="ajcun", enabled=True, folder="寸/AJ寸", m_hi=4)
+    panel = RulePanel(host, cfg, {"AJ寸"}, existing=rule)
+    panel.resize(1000, 900)
+    panel.show()                                   # 非模态地摆出来，靠事件过滤器自己重算
+    QtWidgets.QApplication.processEvents()
+    before = panel.card.height()
+    panel.kind_box.setCurrentIndex(2)                                  # ATTACK+MISS
+    QtWidgets.QApplication.processEvents()
+    after = panel.card.height()
+    panel.hide()
+    assert after > before, (before, after)
+
+
+def test_the_first_run_hint_comes_back_after_an_invalid_pick(app, cfg, monkeypatch, tmp_path):
+    """先选对一次（提示被藏起来），再选一个不像游戏目录的：原因必须重新露出来。"""
+    from ui import first_run
+    monkeypatch.setattr(first_run.game_locator, "autodetect", lambda _cfg: None)
+    host = QtWidgets.QMainWindow()
+    host.setCentralWidget(QtWidgets.QWidget())
+    panel = first_run.FirstRunPanel(host, cfg)
+    game = tmp_path / "CHUNITHM"
+    (game / "bin").mkdir(parents=True)
+    panel._set_root(game, "")
+    assert panel._hint.isHidden()
+    monkeypatch.setattr(first_run.QFileDialog, "getExistingDirectory",
+                        lambda *_a: str(tmp_path / "somewhere-else"))
+    (tmp_path / "somewhere-else").mkdir()
+    panel._browse()
+    assert not panel._hint.isHidden() and panel._hint.text()
